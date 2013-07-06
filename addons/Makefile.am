@@ -1,12 +1,21 @@
+if ADDON_MYTHTV
+          ADDON_MYTHTV_SUBDIRS = pvr.mythtv.cmyth
+endif
+if ADDON_IPTVSIMPLE
+          ADDON_IPTVSIMPLE_SUBDIRS = pvr.iptvsimple
+endif
+
 SUBDIRS = pvr.demo \
+          pvr.dvbviewer \
           pvr.hts \
           pvr.mediaportal.tvserver \
-          pvr.vdr.vnsi
-
-if USE_CURL
-SUBDIRS += pvr.njoy \
-           pvr.fortherecord.argus
-endif
+          pvr.nextpvr \
+          pvr.vdr.vnsi \
+          pvr.njoy \
+          pvr.vuplus \
+          pvr.argustv \
+          $(ADDON_MYTHTV_SUBDIRS) \
+          $(ADDON_IPTVSIMPLE_SUBDIRS)
 
 clean:
 	-rm -f *.zip

@@ -26,6 +26,10 @@
 #include <vector>
 #include <map>
 
+#include "avcodec.h"
+
+typedef std::vector<CodecID> CodecVector;
+
 #include "platform/util/StdString.h"
 
 typedef struct htsmsg htsmsg_t;
@@ -174,6 +178,7 @@ struct SRecording
   uint32_t         start;
   uint32_t         stop;
   std::string      title;
+  std::string      path;
   std::string      description;
   ERecordingState  state;
   std::string      error;

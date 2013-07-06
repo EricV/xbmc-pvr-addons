@@ -23,7 +23,7 @@
 
 using namespace std;
 
-#include "os-dependent.h" //needed for snprintf
+#include "platform/os.h" //needed for snprintf
 #include "client.h"
 #include "timers.h"
 #include "utils.h"
@@ -49,19 +49,30 @@ cTimer::cTimer()
   m_ismanual           = false;
   m_isrecording        = false;
   m_progid             = -1;
-  m_series             = false;
 }
 
 
 cTimer::cTimer(const PVR_TIMER& timerinfo)
 {
-  if(timerinfo.iEpgUid!=-1)
+
+  m_index = timerinfo.iClientIndex;
+  m_progid = timerinfo.iEpgUid;
+
+  if(strlen(timerinfo.strDirectory) > 0)
   {
-    m_progid = timerinfo.iClientIndex;
-    m_index  = timerinfo.iEpgUid;
+    // Workaround: retrieve the schedule id from the directory name if set
+    int schedule_id = 0;
+    unsigned int program_id = 0;
+
+    if (sscanf(timerinfo.strDirectory, "%9d/%9u", &schedule_id, &program_id) == 2)
+    {
+      if (program_id == timerinfo.iClientIndex)
+      {
+        m_index  = schedule_id;
+        m_progid = program_id;
+      }
+    }
   }
-  else
-    m_index = timerinfo.iClientIndex;
 
   m_done = (timerinfo.state == PVR_TIMER_STATE_COMPLETED);
   m_active = (timerinfo.state == PVR_TIMER_STATE_SCHEDULED || timerinfo.state == PVR_TIMER_STATE_RECORDING);
@@ -131,14 +142,23 @@ void cTimer::GetPVRtimerinfo(PVR_TIMER &tag)
 
   if (m_progid != -1)
   {
+    // Use the EPG (program) id as unique id to see all scheduled programs in the EPG and timer list
+    // Next program (In Home) is always the right one. Mostly seen with programs that are shown daily.
     tag.iClientIndex    = m_progid;
     tag.iEpgUid         = m_index;
+
+    // Workaround: store the schedule and program id as directory name
+    // This is needed by the PVR addon to map an XBMC timer back to the MediaPortal schedule
+    // because we can't use the iClientIndex as schedule id anymore...
+    snprintf(tag.strDirectory, sizeof(tag.strDirectory)-1, "%d/%d", m_index, m_progid);
   }
   else
   {
-     tag.iClientIndex   = m_index; //Support older TVServer and Manual Schedule having a program name that does not have a match in MP EPG.
-     tag.iEpgUid        = 0;
+    tag.iClientIndex   = m_index; //Support older TVServer and Manual Schedule having a program name that does not have a match in MP EPG.
+    tag.iEpgUid        = 0;
+    PVR_STRCLR(tag.strDirectory);
   }
+
   if (IsRecording())
     tag.state           = PVR_TIMER_STATE_RECORDING;
   else if (m_active)
@@ -147,7 +167,6 @@ void cTimer::GetPVRtimerinfo(PVR_TIMER &tag)
     tag.state           = PVR_TIMER_STATE_CANCELLED;
   tag.iClientChannelUid = m_channel;
   PVR_STRCPY(tag.strTitle, m_title.c_str());
-  PVR_STRCPY(tag.strDirectory, m_directory.c_str());
   tag.startTime         = m_starttime ;
   tag.endTime           = m_endtime ;
   // From the VDR manual
@@ -163,8 +182,8 @@ void cTimer::GetPVRtimerinfo(PVR_TIMER &tag)
   tag.iLifetime         = GetLifetime();
   tag.bIsRepeating      = Repeat();
   tag.iWeekdays         = RepeatFlags();
-  tag.iMarginStart      = m_prerecordinterval * 60;
-  tag.iMarginEnd        = m_postrecordinterval * 60;
+  tag.iMarginStart      = m_prerecordinterval;
+  tag.iMarginEnd        = m_postrecordinterval;
   tag.iGenreType        = 0;
   tag.iGenreSubType     = 0;
 }
@@ -372,7 +391,7 @@ ScheduleRecordingType cTimer::RepeatFlags2SchedRecType(int repeatflags)
       return Daily;
       break;
     default:
-      return Once;
+      break;
   }
 
   return Once;
@@ -437,7 +456,7 @@ std::string cTimer::UpdateScheduleCommand()
   if ( g_iTVServerXBMCBuild >= 100)
   {
     // Sending separate marginStart, marginStop and schedType is supported
-    snprintf(command, 1024, "UpdateSchedule:%i|%i|%i|%s|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i\n",
+    snprintf(command, 1024, "UpdateSchedule:%i|%i|%i|%s|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i|%i\n",
             m_index,                                                           //Schedule index [0]
             m_active,                                                          //Active         [1]
             m_channel,                                                         //Channel number [2]
@@ -449,7 +468,7 @@ std::string cTimer::UpdateScheduleCommand()
             (int) m_schedtype, m_priority, (int) m_keepmethod,                 //SchedType, Priority, keepMethod [16..18]
             keepdate.tm_year + 1900, keepdate.tm_mon + 1, keepdate.tm_mday,    //Keepdate       [19..21]
             keepdate.tm_hour, keepdate.tm_min, keepdate.tm_sec,                //Keeptime       [22..24]
-            m_prerecordinterval, m_postrecordinterval);                        //Prerecord,postrecord [25,26]
+            m_prerecordinterval, m_postrecordinterval, m_progid);              //Prerecord,postrecord,program_id [25,26,27]
   }
   else
   {

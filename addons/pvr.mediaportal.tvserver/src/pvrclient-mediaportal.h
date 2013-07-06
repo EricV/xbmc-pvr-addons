@@ -32,7 +32,7 @@
 /* Use a forward declaration here. Including RTSPClient.h via TSReader.h at this point gives compile errors */
 class CTsReader;
 
-class cPVRClientMediaPortal
+class cPVRClientMediaPortal: public PLATFORM::PreventCopy
 {
 public:
   /* Class interface */
@@ -71,6 +71,7 @@ public:
   PVR_ERROR GetRecordings(ADDON_HANDLE handle);
   PVR_ERROR DeleteRecording(const PVR_RECORDING &recording);
   PVR_ERROR RenameRecording(const PVR_RECORDING &recording);
+  PVR_ERROR SetRecordingPlayCount(const PVR_RECORDING &recording, int count);
 
   /* Timer handling */
   int GetNumTimers(void);
@@ -91,6 +92,8 @@ public:
   long long SeekLiveStream(long long iPosition, int iWhence = SEEK_SET);
   long long LengthLiveStream(void);
   long long PositionLiveStream(void);
+  bool CanPauseAndSeek(void);
+  void PauseStream(bool bPaused);
 
   /* Record stream handling */
   bool OpenRecordedStream(const PVR_RECORDING &recording);
@@ -105,7 +108,8 @@ protected:
 
 private:
   bool GetChannel(unsigned int number, PVR_CHANNEL &channeldata);
-  bool LoadGenreXML(const std::string &filename);
+  void LoadGenreTable(void);
+  void LoadCardSettings(void);
 
   int                     m_iCurrentChannel;
   int                     m_iCurrentCard;
@@ -123,11 +127,6 @@ private:
   PLATFORM::CMutex        m_mutex;
   int64_t                 m_iLastRecordingUpdate;
   CTsReader*              m_tsreader;
-
-  char                    m_noSignalStreamData[ 6 + 0xffff ];
-  long                    m_noSignalStreamSize;
-  long                    m_noSignalStreamReadPos;
-  bool                    m_bPlayingNoSignal;
 
   void Close();
 

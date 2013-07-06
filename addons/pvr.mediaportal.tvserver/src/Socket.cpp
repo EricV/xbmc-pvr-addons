@@ -19,7 +19,7 @@
 #include "libXBMC_addon.h"
 #include "utils.h"
 #include <string>
-#include "os-dependent.h"
+#include "platform/os.h"
 #include "client.h"
 #include "Socket.h"
 
@@ -134,7 +134,7 @@ bool Socket::bind ( const unsigned short port )
     return false;
   }
 
-  _sockaddr.sin_family = _family;
+  _sockaddr.sin_family = (sa_family_t) _family;
   _sockaddr.sin_addr.s_addr = INADDR_ANY;  //listen to all
   _sockaddr.sin_port = htons( port );
 
@@ -449,7 +449,7 @@ bool Socket::connect ( const std::string& host, const unsigned short port )
     return false;
   }
 
-  _sockaddr.sin_family = _family;
+  _sockaddr.sin_family = (sa_family_t) _family;
   _sockaddr.sin_port = htons ( port );
 
   if ( !setHostname( host ) )

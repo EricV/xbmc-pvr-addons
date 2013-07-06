@@ -23,14 +23,19 @@
 #include "xbmc_pvr_dll.h"
 #include "HTSPData.h"
 #include "HTSPDemux.h"
+#include "GUIDialogTranscode.h"
+#include "platform/threads/mutex.h"
+#include "platform/util/atomic.h"
+#include "platform/util/util.h"
 
 using namespace std;
 using namespace ADDON;
+using namespace PLATFORM;
 
 bool         m_bCreated  = false;
 ADDON_STATUS m_CurStatus = ADDON_STATUS_UNKNOWN;
 int          g_iClientId = -1;
-unsigned int g_iPacketSequence = 0;
+long         g_iPacketSequence = 0;
 
 /* User adjustable settings are saved here.
  * Default values are defined inside client.h
@@ -41,6 +46,10 @@ int         g_iPortHTSP               = DEFAULT_HTSP_PORT;
 int         g_iPortHTTP               = DEFAULT_HTTP_PORT;
 int         g_iConnectTimeout         = DEFAULT_CONNECT_TIMEOUT;
 int         g_iResponseTimeout        = DEFAULT_RESPONSE_TIMEOUT;
+bool        g_bTranscode              = DEFAULT_TRANSCODE;
+CodecID     g_iAudioCodec             = DEFAULT_AUDIO_CODEC;
+CodecID     g_iVideoCodec             = DEFAULT_VIDEO_CODEC;
+int         g_iResolution             = DEFAULT_RESOLUTION;
 std::string g_strUsername             = "";
 std::string g_strPassword             = "";
 std::string g_strUserPath             = "";
@@ -48,8 +57,26 @@ std::string g_strClientPath           = "";
 
 CHelper_libXBMC_addon *XBMC           = NULL;
 CHelper_libXBMC_pvr   *PVR            = NULL;
-CHTSPDemux *           HTSPDemuxer    = NULL;
+CHelper_libXBMC_gui   *GUI            = NULL;
+PVR_MENUHOOK          *menuHook       = NULL;
 CHTSPData *            HTSPData       = NULL;
+CMutex g_seqMutex;
+
+uint32_t HTSPNextSequenceNumber(void)
+{
+  long lSequence = atomic_inc(&g_iPacketSequence);
+
+  if ((uint32_t)lSequence != lSequence)
+  {
+    CLockObject lock(g_seqMutex);
+    if ((uint32_t)g_iPacketSequence != g_iPacketSequence)
+      g_iPacketSequence = 0;
+
+    lSequence = atomic_inc(&g_iPacketSequence);
+  }
+
+  return (uint32_t)lSequence;
+}
 
 extern "C" {
 
@@ -96,6 +123,22 @@ void ADDON_ReadSettings(void)
   /* read setting "read_timeout" from settings.xml */
   if (!XBMC->GetSetting("response_timeout", &g_iResponseTimeout))
     g_iResponseTimeout = DEFAULT_RESPONSE_TIMEOUT;
+
+  /* read setting "transcode" from settings.xml */
+  if (!XBMC->GetSetting("transcode", &g_bTranscode))
+    g_bTranscode = DEFAULT_TRANSCODE;
+
+  /* read setting "audio_codec" from settings.xml */
+  if (!XBMC->GetSetting("audio_codec", &g_iAudioCodec))
+    g_iAudioCodec = DEFAULT_AUDIO_CODEC;
+
+  /* read setting "video_codec" from settings.xml */
+  if (!XBMC->GetSetting("video_codec", &g_iVideoCodec))
+    g_iVideoCodec = DEFAULT_VIDEO_CODEC;
+
+  /* read setting "resolution" from settings.xml */
+  if (!XBMC->GetSetting("resolution", &g_iResolution))
+    g_iResolution = DEFAULT_RESOLUTION;
 }
 
 ADDON_STATUS ADDON_Create(void* hdl, void* props)
@@ -108,19 +151,25 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
   XBMC = new CHelper_libXBMC_addon;
   if (!XBMC->RegisterMe(hdl))
   {
-    delete XBMC;
-    XBMC = NULL;
-    return ADDON_STATUS_UNKNOWN;
+    SAFE_DELETE(XBMC);
+    return ADDON_STATUS_PERMANENT_FAILURE;
+  }
+
+  GUI = new CHelper_libXBMC_gui;
+  if (!GUI->RegisterMe(hdl))
+  {
+    SAFE_DELETE(GUI);
+    SAFE_DELETE(XBMC);
+    return ADDON_STATUS_PERMANENT_FAILURE;
   }
 
   PVR = new CHelper_libXBMC_pvr;
   if (!PVR->RegisterMe(hdl))
   {
-    delete PVR;
-    delete XBMC;
-    PVR = NULL;
-    XBMC = NULL;
-    return ADDON_STATUS_UNKNOWN;
+    SAFE_DELETE(PVR);
+    SAFE_DELETE(GUI);
+    SAFE_DELETE(XBMC);
+    return ADDON_STATUS_PERMANENT_FAILURE;
   }
 
   XBMC->Log(LOG_DEBUG, "%s - Creating Tvheadend PVR-Client", __FUNCTION__);
@@ -134,14 +183,21 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
   HTSPData = new CHTSPData;
   if (!HTSPData->Open())
   {
-    delete HTSPData;
-    delete PVR;
-    delete XBMC;
-    HTSPData = NULL;
-    PVR = NULL;
-    XBMC = NULL;
+    SAFE_DELETE(HTSPData);
+    SAFE_DELETE(PVR);
+    SAFE_DELETE(GUI);
+    SAFE_DELETE(XBMC);
     m_CurStatus = ADDON_STATUS_LOST_CONNECTION;
     return m_CurStatus;
+  }
+
+  if(HTSPData->CanTranscode())
+  {
+    menuHook = new PVR_MENUHOOK();
+    menuHook->category = PVR_MENUHOOK_ALL;
+    menuHook->iHookId = 1;
+    menuHook->iLocalizedStringId = 30100;
+    PVR->AddMenuHook(menuHook);
   }
 
   m_CurStatus = ADDON_STATUS_OK;
@@ -160,27 +216,12 @@ ADDON_STATUS ADDON_GetStatus()
 
 void ADDON_Destroy()
 {
-  if (m_bCreated)
-  {
-    if (HTSPData)
-    {
-      delete HTSPData;
-      HTSPData = NULL;
-    }
-    m_bCreated = false;
-  }
-
-  if (PVR)
-  {
-    delete PVR;
-    PVR = NULL;
-  }
-
-  if (XBMC)
-  {
-    delete XBMC;
-    XBMC = NULL;
-  }
+  m_bCreated = false;
+  SAFE_DELETE(HTSPData);
+  SAFE_DELETE(PVR);
+  SAFE_DELETE(GUI);
+  SAFE_DELETE(XBMC);
+  SAFE_DELETE(menuHook);
 
   m_CurStatus = ADDON_STATUS_UNKNOWN;
 }
@@ -265,6 +306,43 @@ ADDON_STATUS ADDON_SetSetting(const char *settingName, const void *settingValue)
       return ADDON_STATUS_OK;
     }
   }
+  else if (str == "transcode")
+  {
+    int bNewValue = *(bool*) settingValue;
+    XBMC->Log(LOG_INFO, "%s - Changed Setting 'transcode' from %u to %u", __FUNCTION__, g_bTranscode, bNewValue);
+    g_bTranscode = (bNewValue == 1);
+  }
+  else if (str == "resolution")
+  {
+    int iNewValue = *(int*) settingValue + 1;
+    if (g_iResolution != iNewValue)
+    {
+      XBMC->Log(LOG_INFO, "%s - Changed Setting 'resolution' from %u to %u", __FUNCTION__, g_iResolution, iNewValue);
+      g_iResolution = iNewValue;
+      return ADDON_STATUS_OK;
+    }
+  }
+  else if (str == "video_codec")
+  {
+    int iNewValue = *(int*) settingValue + 1;
+    if (g_iVideoCodec != iNewValue)
+    {
+      XBMC->Log(LOG_INFO, "%s - Changed Setting 'video_codec' from %u to %u", __FUNCTION__, g_iVideoCodec, iNewValue);
+      g_iVideoCodec = (CodecID)iNewValue;
+      return ADDON_STATUS_OK;
+    }
+  }
+  else if (str == "audio_codec")
+  {
+    int iNewValue = *(int*) settingValue + 1;
+    if (g_iAudioCodec != iNewValue)
+    {
+      XBMC->Log(LOG_INFO, "%s - Changed Setting 'audio_codec' from %u to %u", __FUNCTION__, g_iAudioCodec, iNewValue);
+      g_iAudioCodec = (CodecID)iNewValue;
+      return ADDON_STATUS_OK;
+    }
+  }
+
   return ADDON_STATUS_OK;
 }
 
@@ -273,6 +351,10 @@ void ADDON_Stop()
 }
 
 void ADDON_FreeSettings()
+{
+}
+
+void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
 {
 }
 
@@ -292,17 +374,29 @@ const char* GetMininumPVRAPIVersion(void)
   return strMinApiVersion;
 }
 
+const char* GetGUIAPIVersion(void)
+{
+  static const char *strGuiApiVersion = XBMC_GUI_API_VERSION;
+  return strGuiApiVersion;
+}
+
+const char* GetMininumGUIAPIVersion(void)
+{
+  static const char *strMinGuiApiVersion = XBMC_GUI_MIN_API_VERSION;
+  return strMinGuiApiVersion;
+}
+
 PVR_ERROR GetAddonCapabilities(PVR_ADDON_CAPABILITIES* pCapabilities)
 {
-  pCapabilities->bSupportsEPG             = true;
-  pCapabilities->bSupportsTV              = true;
-  pCapabilities->bSupportsRadio           = true;
-  pCapabilities->bSupportsRecordings      = true;
-  pCapabilities->bSupportsTimers          = true;
-  pCapabilities->bSupportsChannelGroups   = true;
-  pCapabilities->bHandlesInputStream      = true;
-  pCapabilities->bHandlesDemuxing         = true;
-
+  pCapabilities->bSupportsEPG              = true;
+  pCapabilities->bSupportsTV               = true;
+  pCapabilities->bSupportsRadio            = true;
+  pCapabilities->bSupportsRecordings       = true;
+  pCapabilities->bSupportsTimers           = true;
+  pCapabilities->bSupportsChannelGroups    = true;
+  pCapabilities->bHandlesInputStream       = true;
+  pCapabilities->bHandlesDemuxing          = true;
+  pCapabilities->bSupportsRecordingFolders = true;
   return PVR_ERROR_NO_ERROR;
 }
 
@@ -441,69 +535,56 @@ PVR_ERROR UpdateTimer(const PVR_TIMER &timer)
 
 bool OpenLiveStream(const PVR_CHANNEL &channel)
 {
-  CloseLiveStream();
-
-  if (!HTSPData || !HTSPData->IsConnected())
-    return false;
-
-  HTSPDemuxer = new CHTSPDemux;
-  return HTSPDemuxer->Open(channel);
+  return HTSPData ?
+      HTSPData->OpenLiveStream(channel) :
+      false;
 }
 
 void CloseLiveStream(void)
 {
-  if (HTSPDemuxer)
-  {
-    HTSPDemuxer->Close();
-    delete HTSPDemuxer;
-    HTSPDemuxer = NULL;
-  }
+  if (HTSPData)
+    HTSPData->CloseLiveStream();
 }
 
 int GetCurrentClientChannel(void)
 {
-  if (HTSPDemuxer)
-    return HTSPDemuxer->CurrentChannel();
-
-  return -1;
+  return HTSPData ?
+      HTSPData->GetCurrentClientChannel():
+      -1;
 }
 
 bool SwitchChannel(const PVR_CHANNEL &channel)
 {
-  if (HTSPDemuxer)
-    return HTSPDemuxer->SwitchChannel(channel);
-
-  return false;
+  return HTSPData ?
+      HTSPData->SwitchChannel(channel) :
+      false;
 }
 
 PVR_ERROR GetStreamProperties(PVR_STREAM_PROPERTIES* pProperties)
 {
-  if (HTSPDemuxer && HTSPDemuxer->GetStreamProperties(pProperties))
-    return PVR_ERROR_NO_ERROR;
-
-  return PVR_ERROR_SERVER_ERROR;
+  return HTSPData ?
+      HTSPData->GetStreamProperties(pProperties) :
+      PVR_ERROR_SERVER_ERROR;
 }
 
 PVR_ERROR SignalStatus(PVR_SIGNAL_STATUS &signalStatus)
 {
-  if (HTSPDemuxer && HTSPDemuxer->GetSignalStatus(signalStatus))
-    return PVR_ERROR_NO_ERROR;
-
-  return PVR_ERROR_FAILED;
+  return HTSPData ?
+      HTSPData->SignalStatus(signalStatus) :
+      PVR_ERROR_SERVER_ERROR;
 }
 
 void DemuxAbort(void)
 {
-  if (HTSPDemuxer)
-    HTSPDemuxer->Abort();
+  if (HTSPData)
+    HTSPData->DemuxAbort();
 }
 
 DemuxPacket* DemuxRead(void)
 {
-  if (HTSPDemuxer)
-    return HTSPDemuxer->Read();
-  else
-    return NULL;
+  return HTSPData ?
+      HTSPData->DemuxRead() :
+      NULL;
 }
 
 int GetChannelGroupsAmount(void)
@@ -538,22 +619,105 @@ PVR_ERROR GetChannelGroupMembers(ADDON_HANDLE handle, const PVR_CHANNEL_GROUP &g
   return HTSPData->GetChannelGroupMembers(handle, group);
 }
 
+PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook, const PVR_MENUHOOK_DATA &item)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return PVR_ERROR_SERVER_ERROR;
+
+  if (!HTSPData->CanTranscode())
+    return PVR_ERROR_REJECTED;
+
+  CodecVector v = HTSPData->GetTranscodingCodecs();
+  CGUIDialogTranscode settings(v);
+
+  settings.DoModal();
+
+  return PVR_ERROR_NO_ERROR;
+}
+
+bool OpenRecordedStream(const PVR_RECORDING &recording)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return false;
+  return HTSPData->OpenRecordedStream(recording);
+}
+
+void CloseRecordedStream(void)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return;
+  HTSPData->CloseRecordedStream();
+}
+
+int ReadRecordedStream(unsigned char *pBuffer, unsigned int iBufferSize)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return -1;
+  return HTSPData->ReadRecordedStream(pBuffer, iBufferSize);
+}
+
+long long SeekRecordedStream(long long iPosition, int iWhence /* = SEEK_SET */)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return -1;
+  return HTSPData->SeekRecordedStream(iPosition, iWhence);
+}
+
+long long PositionRecordedStream(void)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return -1;
+  return HTSPData->PositionRecordedStream();
+}
+
+long long LengthRecordedStream(void)
+{
+  if (!HTSPData || !HTSPData->IsConnected())
+    return -1;
+  return HTSPData->LengthRecordedStream();
+}
+
+bool CanPauseStream(void)
+{
+  if (HTSPData)
+    return HTSPData->CanTimeshift();
+  return false;
+}
+
+bool CanSeekStream(void)
+{
+  if (HTSPData)
+    return HTSPData->CanSeekLiveStream();
+  return false;
+}
+
+bool SeekTime(int time,bool backward,double *startpts)
+{
+  return HTSPData ?
+      HTSPData->SeekTime(time, backward, startpts) :
+      false;
+}
+
+void SetSpeed(int speed)
+{
+  if(HTSPData)
+    HTSPData->SetSpeed(speed);
+}
+
+void DemuxFlush(void)
+{
+  if (HTSPData)
+    HTSPData->DemuxFlush();
+}
+
 /** UNUSED API FUNCTIONS */
 PVR_ERROR DialogChannelScan(void) { return PVR_ERROR_NOT_IMPLEMENTED; }
-PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR DeleteChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR RenameChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR MoveChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR DialogChannelSettings(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR DialogAddChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
-bool OpenRecordedStream(const PVR_RECORDING &recording) { return false; }
-void CloseRecordedStream(void) {}
-int ReadRecordedStream(unsigned char *pBuffer, unsigned int iBufferSize) { return 0; }
-long long SeekRecordedStream(long long iPosition, int iWhence /* = SEEK_SET */) { return 0; }
-long long PositionRecordedStream(void) { return -1; }
-long long LengthRecordedStream(void) { return 0; }
 void DemuxReset(void) {}
-void DemuxFlush(void) {}
 int ReadLiveStream(unsigned char *pBuffer, unsigned int iBufferSize) { return 0; }
 long long SeekLiveStream(long long iPosition, int iWhence /* = SEEK_SET */) { return -1; }
 long long PositionLiveStream(void) { return -1; }
@@ -562,5 +726,8 @@ const char * GetLiveStreamURL(const PVR_CHANNEL &channel) { return ""; }
 PVR_ERROR SetRecordingPlayCount(const PVR_RECORDING &recording, int count) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR SetRecordingLastPlayedPosition(const PVR_RECORDING &recording, int lastplayedposition) { return PVR_ERROR_NOT_IMPLEMENTED; }
 int GetRecordingLastPlayedPosition(const PVR_RECORDING &recording) { return -1; }
+PVR_ERROR GetRecordingEdl(const PVR_RECORDING&, PVR_EDL_ENTRY[], int*) { return PVR_ERROR_NOT_IMPLEMENTED; };
 unsigned int GetChannelSwitchDelay(void) { return 0; }
+void PauseStream(bool bPaused) {}
+
 }

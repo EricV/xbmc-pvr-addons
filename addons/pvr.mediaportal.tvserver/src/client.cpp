@@ -78,7 +78,7 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
   if (!XBMC->RegisterMe(hdl))
   {
     SAFE_DELETE(XBMC);
-    return ADDON_STATUS_UNKNOWN;
+    return ADDON_STATUS_PERMANENT_FAILURE;
   }
 
   PVR = new CHelper_libXBMC_pvr;
@@ -86,7 +86,7 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
   {
     SAFE_DELETE(PVR);
     SAFE_DELETE(XBMC);
-    return ADDON_STATUS_UNKNOWN;
+    return ADDON_STATUS_PERMANENT_FAILURE;
   }
 
   XBMC->Log(LOG_INFO, "Creating MediaPortal PVR-Client");
@@ -418,6 +418,10 @@ void ADDON_FreeSettings()
 
 }
 
+void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
+{
+}
+
 /***********************************************************
  * PVR Client AddOn specific public library functions
  ***********************************************************/
@@ -434,6 +438,18 @@ const char* GetMininumPVRAPIVersion(void)
   return strMinApiVersion;
 }
 
+const char* GetGUIAPIVersion(void)
+{
+  static const char *strGuiApiVersion = XBMC_GUI_API_VERSION;
+  return strGuiApiVersion;
+}
+
+const char* GetMininumGUIAPIVersion(void)
+{
+  static const char *strMinGuiApiVersion = XBMC_GUI_MIN_API_VERSION;
+  return strMinGuiApiVersion;
+}
+
 //-- GetAddonCapabilities -----------------------------------------------------
 // Tell XBMC our requirements
 //-----------------------------------------------------------------------------
@@ -441,7 +457,6 @@ PVR_ERROR GetAddonCapabilities(PVR_ADDON_CAPABILITIES *pCapabilities)
 {
   XBMC->Log(LOG_DEBUG, "->GetProperties()");
 
-  //pCapabilities->bSupportsTimeshift          = true; //removed from Frodo API
   pCapabilities->bSupportsEPG                = true;
   pCapabilities->bSupportsRecordings         = true;
   pCapabilities->bSupportsTimers             = true;
@@ -451,7 +466,9 @@ PVR_ERROR GetAddonCapabilities(PVR_ADDON_CAPABILITIES *pCapabilities)
   pCapabilities->bHandlesInputStream         = true;
   pCapabilities->bHandlesDemuxing            = false;
   pCapabilities->bSupportsChannelScan        = false;
+  pCapabilities->bSupportsRecordingPlayCount = (g_iTVServerXBMCBuild < 117) ? false : true;
   pCapabilities->bSupportsLastPlayedPosition = false;
+  pCapabilities->bSupportsRecordingFolders   = false; // Don't show the timer directory field. This does not influence the displaying directories in the recordings list.
 
   return PVR_ERROR_NO_ERROR;
 }
@@ -518,7 +535,7 @@ PVR_ERROR DialogChannelScan()
   return PVR_ERROR_NOT_IMPLEMENTED;
 }
 
-PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook)
+PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook, const PVR_MENUHOOK_DATA &item)
 {
   return PVR_ERROR_NOT_IMPLEMENTED;
 }
@@ -639,6 +656,13 @@ PVR_ERROR RenameRecording(const PVR_RECORDING &recording)
     return g_client->RenameRecording(recording);
 }
 
+PVR_ERROR SetRecordingPlayCount(const PVR_RECORDING &recording, int count)
+{
+  if (!g_client)
+    return PVR_ERROR_SERVER_ERROR;
+  else
+    return g_client->SetRecordingPlayCount(recording, count);
+}
 
 /*******************************************/
 /** PVR Timer Functions                   **/
@@ -814,6 +838,28 @@ const char * GetLiveStreamURL(const PVR_CHANNEL &channel)
     return g_client->GetLiveStreamURL(channel);
 }
 
+bool CanPauseStream(void)
+{
+  if (g_client)
+    return g_client->CanPauseAndSeek();
+
+  return false;
+}
+
+void PauseStream(bool bPaused)
+{
+  if (g_client)
+    g_client->PauseStream(bPaused);
+}
+
+bool CanSeekStream(void)
+{
+  if (g_client)
+    return g_client->CanPauseAndSeek();
+
+  return false;
+}
+
 /** UNUSED API FUNCTIONS */
 PVR_ERROR MoveChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 DemuxPacket* DemuxRead(void) { return NULL; }
@@ -821,8 +867,10 @@ void DemuxAbort(void) {}
 void DemuxReset(void) {}
 void DemuxFlush(void) {}
 
-PVR_ERROR SetRecordingPlayCount(const PVR_RECORDING &recording, int count) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR SetRecordingLastPlayedPosition(const PVR_RECORDING &recording, int lastplayedposition) { return PVR_ERROR_NOT_IMPLEMENTED; }
 int GetRecordingLastPlayedPosition(const PVR_RECORDING &recording) { return -1; }
+PVR_ERROR GetRecordingEdl(const PVR_RECORDING&, PVR_EDL_ENTRY[], int*) { return PVR_ERROR_NOT_IMPLEMENTED; };
 unsigned int GetChannelSwitchDelay(void) { return 0; }
+bool SeekTime(int,bool,double*) { return false; }
+void SetSpeed(int) {};
 } //end extern "C"

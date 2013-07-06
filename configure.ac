@@ -5,6 +5,8 @@ AC_CANONICAL_TARGET
 
 AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION, [http://www.xbmc.org])
 
+m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([no])])
+
 PREFIX_DEFAULT="/usr/local"
 AC_PREFIX_DEFAULT($PREFIX_DEFAULT)
 
@@ -12,7 +14,7 @@ AC_PROG_CXX
 AC_PROG_CPP
 AC_PROG_LIBTOOL
 
-AC_SEARCH_LIBS([pthread_create],[pthread],, AC_MSG_ERROR("required library 'pthread' is missing"))
+AC_SEARCH_LIBS([pthread_create],[pthread],, AC_MSG_ERROR([required library 'pthread' is missing]))
 
 AC_ARG_ENABLE([release],
   [AS_HELP_STRING([--enable-release],
@@ -21,21 +23,34 @@ AC_ARG_ENABLE([release],
   [use_release=no])
 
 ### External libraries options
-AC_ARG_ENABLE([external-libraries],
-  [AS_HELP_STRING([--enable-external-libraries],
-  [enable use of all supported external libraries (default is no) 'Linux only'])],
-  [use_external_libraries=$enableval],
-  [use_external_libraries=no])
-
 AC_ARG_ENABLE([external-ffmpeg],
   [AS_HELP_STRING([--enable-external-ffmpeg],
   [enable use of external ffmpeg libraries (default is no) 'Linux only'])],
   [use_external_ffmpeg=$enableval],
-  [use_external_ffmpeg=$use_external_libraries])
+  [use_external_ffmpeg=no])
+
+### External dependencies option
+AC_ARG_ENABLE([addons-with-dependencies],
+  [AS_HELP_STRING([--enable-addons-with-dependencies],
+  [enable build of addons that depend on external libraries (default is no)])],
+  [build_addons_with_dependencies=$enableval],
+  [build_addons_with_dependencies=no])
+
+AC_ARG_ENABLE([mysql],
+  [AS_HELP_STRING([--disable-mysql],
+  [disable mysql])],
+  [use_mysql=$enableval],
+  [use_mysql=yes])
 
 BUILD_TYPE="debug"
 if test "$use_release" = "yes"; then
   BUILD_TYPE="release"
+fi
+
+AC_CHECK_PROG(HAVE_PKG_CONFIG, pkg-config, yes)
+if test "x$HAVE_PKG_CONFIG" != "xyes" ; then
+  AC_MSG_WARN([pkg-config was not found on your system. external ffmpeg will be disabled])
+  use_external_ffmpeg="no"
 fi
 
 OS="unknown"
@@ -44,8 +59,17 @@ HOST_INCLUDES=""
 HOST_CXXFLAGS=""
 ARCH_DEFINES="-DTARGET_POSIX -DTARGET_LINUX -D_LINUX"
 DYN_LIB_EXT="so"
-
+TARGET_LDFLAGS=""
+BIN_EXT=".pvr"
+BINPREFIX=""
 case "${host}" in
+  arm-*-linux-androideabi)
+    TARGET_LDFLAGS="-avoid-version -no-undefined"
+    OS="android"
+    ARCHITECTURE="arm"
+    BIN_EXT=".so"
+    BINPREFIX="lib"
+    ;;
   arm*-*-linux*)
     OS="linux"
     ARCHITECTURE="arm"
@@ -70,8 +94,22 @@ case "${host}" in
     OS="linux"
     ARCHITECTURE="i486"
     ;;
+  arm-apple-darwin*)
+    OS="ios"
+    HOST_CXXFLAGS="-dynamiclib -single_module -undefined dynamic_lookup"
+    host_os_osx="yes"
+    ARCH_DEFINES="-DTARGET_POSIX -DTARGET_DARWIN -D_LINUX"
+    DYN_LIB_EXT="dylib"
+    ;;
+  x86_64-apple-darwin*)
+    OS="osx64"
+    HOST_CXXFLAGS="-dynamiclib -single_module -undefined dynamic_lookup"
+    host_os_osx="yes"
+    ARCH_DEFINES="-DTARGET_POSIX -DTARGET_DARWIN -D_LINUX"
+    DYN_LIB_EXT="dylib"
+    ;;
   *-apple-darwin*)
-    OS="darwin"
+    OS="osx32"
     HOST_CXXFLAGS="-dynamiclib -single_module -undefined dynamic_lookup"
     host_os_osx="yes"
     ARCH_DEFINES="-DTARGET_POSIX -DTARGET_DARWIN -D_LINUX"
@@ -84,9 +122,79 @@ case "${host}" in
 esac
 
 ### External libraries checks
-# Curl
-use_libcurl="no"
-PKG_CHECK_MODULES([CURL],[libcurl],use_libcurl="yes",AC_MSG_WARN("CURL was not found, N7 add-on will not be available"))
+# FFmpeg
+if test "$use_external_ffmpeg" = "yes"; then
+  PKG_CHECK_MODULES([FFMPEG], [libavcodec],
+                    [FFMPEG_INCLUDES="$FFMPEG_CFLAGS"; LIBS="$LIBS $FFMPEG_LIBS"],
+                    AC_MSG_ERROR(cannot find libavcodec))
+
+  # Possible places the ffmpeg headers may be
+  AC_CHECK_HEADERS([libavcodec/avcodec.h],[FFMPEG_INCLUDES="-I$($PKG_CONFIG --variable=includedir libavcodec)/libavcodec"],
+    [AC_CHECK_HEADERS([ffmpeg/avcodec.h],[FFMPEG_INCLUDES="-I$($PKG_CONFIG --variable=includedir libavcodec)/ffmpeg"],
+      [AC_MSG_ERROR(avcodec.h not found)])
+  ])
+
+  echo "FFMPEG_INCLUDES: $FFMPEG_INCLUDES"
+fi
+AC_SUBST(FFMPEG_INCLUDES)
+
+AC_CHECK_LIB([GL],[main],have_gl=yes, have_gl=no)  
+if test "$have_gl" = "yes"; then
+  AC_DEFINE([HAVE_GL],[1],["Define to 1 if we have gl"])
+fi
+echo "GL: $have_gl"
+
+AC_CHECK_LIB([GLESv2],[main],have_gles2=yes, have_gles2=no)
+if test "$have_gles2" = "yes"; then
+  AC_DEFINE([HAVE_GLES2],[1],["Define to 1 if we have gles2"])
+  AM_CONDITIONAL(HAVE_GLES2, true)
+else
+  AM_CONDITIONAL(HAVE_GLES2, false)
+fi
+echo "GLES2: $have_gles2"
+
+### End external Libraries 
+
+### Build addons with dependencies
+if test "$build_addons_with_dependencies" = "yes"; then
+  echo "Building addons with dependencies"
+
+  ### Libs that addons depend on
+  if test "$use_mysql" = "yes"; then
+    AC_PATH_PROG(MYSQL_CONFIG, mysql_config, "no")
+    if test "x$MYSQL_CONFIG" != "xno"; then
+      AC_DEFINE([HAVE_MYSQL],[1],["Define to 1 if you have the `mysql' library (-lmysqlclient)."])
+      MYSQL_INCLUDES=`$MYSQL_CONFIG --include`
+      MYSQL_LIBS=`$MYSQL_CONFIG --libs`
+      AC_SUBST(MYSQL_INCLUDES)
+      AC_SUBST(MYSQL_LIBS)
+    else
+      use_mysql=no
+    fi
+  fi
+  echo "MySQL: $use_mysql"
+
+  # Checks for boost headers
+  AC_LANG_PUSH([C++])
+  AC_CHECK_HEADER([boost/shared_ptr.hpp], use_boost=yes, use_boost=no,)
+  AC_LANG_POP([C++])
+  if test "$use_boost" = "yes"; then
+    AC_DEFINE([HAVE_BOOST],[1],["Define to 1 if we have the `boost' headers"])
+  fi
+  echo "Boost: $use_boost"
+
+  AC_CHECK_LIB([z],[inflate], use_zlib=yes, use_zlib=no)
+  if test "$use_zlib" = "yes"; then
+    AC_DEFINE([HAVE_ZLIB],[1],["Define to 1 if we have the zlib library"])
+    ZLIB_LIBS='-lz'
+    AC_SUBST(ZLIB_LIBS)
+  fi
+  echo "Zlib: $use_zlib"
+fi
+
+### Addons with dependencies
+AM_CONDITIONAL([ADDON_MYTHTV], [test "$build_addons_with_dependencies" = "yes" -a "$use_mysql" = "yes" -a "$use_boost" = "yes"])
+AM_CONDITIONAL([ADDON_IPTVSIMPLE], [test "$build_addons_with_dependencies" = "yes" -a "$use_zlib" = "yes"])
 
 ### Check for Intree building
 if test "x${cross_compiling}" = "xyes" || test "x${cross_compiling}" = "xmaybe"; then
@@ -99,33 +207,37 @@ else
   echo "Intree build: $intree"
 fi
 
-# FFmpeg
-if test "$use_external_ffmpeg" = "yes"; then
-  FFMPEG_LIBNAMES="libavcodec" 
-  PKG_CHECK_MODULES([FFMPEG], [$FFMPEG_LIBNAMES],
-                    [FFMPEG_INCLUDES="$FFMPEG_CFLAGS"; LIBS="$LIBS $FFMPEG_LIBS"],
-                    AC_MSG_ERROR(missing $FFMPEG_LIBNAMES))
-
- # Determine whether AVPacket and relevant functions are defined in libavformat
- # or libavcodec
-  AC_CHECK_LIB([avcodec], [av_free_packet],
-  [AC_MSG_NOTICE(== AVPacket and relevant functions defined in libavcodec. ==)],
-  [AC_MSG_NOTICE(== AVPacket and relevant functions defined in libavformat. ==)
-   AC_DEFINE([AVPACKET_IN_AVFORMAT], [1], [Whether AVPacket is in libavformat.])])
-
-  # Possible places the ffmpeg headers may be
-  #AC_CHECK_HEADERS([libavcodec/avcodec.h ffmpeg/avcodec.h],, AC_MSG_ERROR(avcodec.h not found),)
-  AC_CHECK_HEADERS([libavcodec/avcodec.h],[FFMPEG_INCLUDES="-I$($PKG_CONFIG --variable=includedir libavcodec)/libavcodec"],
-    [AC_CHECK_HEADERS([ffmpeg/avcodec.h],[FFMPEG_INCLUDES="-I$($PKG_CONFIG --variable=includedir libavcodec)/ffmpeg"],
-      [AC_MSG_ERROR(avcodec.h not found)])
-  ])
-
-  echo "FFMPEG_INCLUDES: $FFMPEG_INCLUDES"
-  AM_CONDITIONAL(USE_EXTERNAL_FFMPEG, true)
-  AC_SUBST(FFMPEG_INCLUDES)
-else
-  AM_CONDITIONAL(USE_EXTERNAL_FFMPEG, false)
+# Check for intrinsics
+AC_MSG_CHECKING([for __sync_add_and_fetch(temp, 1)])
+AC_TRY_COMPILE([],[long* temp=0; __sync_add_and_fetch(temp, 1);],
+                [have_builtin_sync_add_and_fetch=yes],
+                [have_builtin_sync_add_and_fetch=no])
+AC_MSG_RESULT($have_builtin_sync_add_and_fetch)
+if test "x$have_builtin_sync_add_and_fetch" = "xyes"; then
+    AC_DEFINE(HAS_BUILTIN_SYNC_ADD_AND_FETCH, 1,
+        [Define to 1 if your compiler supports the __sync_add_and_fetch() intrinsic.])
 fi
+
+AC_MSG_CHECKING([for __sync_sub_and_fetch(temp, 1)])
+AC_TRY_COMPILE([],[long* temp=0; __sync_sub_and_fetch(temp, 1);],
+                [have_builtin_sync_sub_and_fetch=yes],
+                [have_builtin_sync_sub_and_fetch=no])
+AC_MSG_RESULT($have_builtin_sync_sub_and_fetch)
+if test "x$have_builtin_sync_sub_and_fetch" = "xyes"; then
+    AC_DEFINE(HAS_BUILTIN_SYNC_SUB_AND_FETCH, 1,
+        [Define to 1 if your compiler supports the __sync_sub_and_fetch() intrinsic.])
+fi
+
+AC_MSG_CHECKING([for __sync_val_compare_and_swap(temp, 1, 1)])
+AC_TRY_COMPILE([],[long *temp = 0; __sync_val_compare_and_swap(temp, 1, 1);],
+                [have_builtin_sync_val_compare_and_swap=yes],
+                [have_builtin_sync_val_compare_and_swap=no])
+AC_MSG_RESULT($have_builtin_sync_val_compare_and_swap)
+if test "x$have_builtin_sync_val_compare_and_swap" = "xyes"; then
+    AC_DEFINE(HAS_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP, 1,
+        [Define to 1 if your compiler supports the __sync_val_compare_and_swap() intrinsic.])
+fi
+
 
 
 HOST_CXXFLAGS="-Wall -Wextra -Wno-missing-field-initializers -Woverloaded-virtual -Wno-parentheses -fPIC $HOST_CXXFLAGS"
@@ -137,19 +249,14 @@ AC_SUBST(HOST_INCLUDES)
 AC_SUBST(OS)
 AC_SUBST(ARCH_DEFINES)
 AC_SUBST(DYN_LIB_EXT)
+AC_SUBST(TARGET_LDFLAGS)
+AC_SUBST(BINPREFIX)
+AC_SUBST(BIN_EXT)
 
 if test "x$host_os_osx" = "xyes"; then
   AM_CONDITIONAL(HOST_IS_OSX, true)
 else
   AM_CONDITIONAL(HOST_IS_OSX, false)
-fi
-
-if test "x$use_libcurl" = "xyes"; then
-  INCLUDES="$INCLUDES $CURL_CFLAGS"
-  LIBS="$LIBS $CURL_LIBS"
-  AM_CONDITIONAL(USE_CURL, true)
-else
-  AM_CONDITIONAL(USE_CURL, false)
 fi
 
 if test "x${libdir}" != 'x${exec_prefix}/lib'; then
@@ -170,17 +277,36 @@ else
 fi
 AC_SUBST(DATADIR)
 
+AC_CONFIG_FILES([Makefile \
+                 lib/Makefile \
+                 lib/jsoncpp/Makefile \
+                 lib/libhts/Makefile \
+                 lib/tinyxml/Makefile \
+                 lib/cmyth/Makefile \
+                 lib/cmyth/libcmyth/Makefile \
+                 lib/cmyth/librefmem/Makefile \
+                 addons/Makefile \
+                 addons/pvr.demo/Makefile \
+                 addons/pvr.dvbviewer/Makefile \
+                 addons/pvr.argustv/Makefile \
+                 addons/pvr.hts/Makefile \
+                 addons/pvr.mediaportal.tvserver/Makefile \
+                 addons/pvr.nextpvr/Makefile \
+                 addons/pvr.njoy/Makefile \
+                 addons/pvr.vuplus/Makefile \
+                 addons/pvr.vdr.vnsi/Makefile \
+                 addons/pvr.mythtv.cmyth/Makefile \
+                 addons/pvr.iptvsimple/Makefile \
+                 addons/pvr.argustv/addon/addon.xml
+                 addons/pvr.demo/addon/addon.xml
+                 addons/pvr.dvbviewer/addon/addon.xml
+                 addons/pvr.hts/addon/addon.xml
+                 addons/pvr.mediaportal.tvserver/addon/addon.xml
+                 addons/pvr.mythtv.cmyth/addon/addon.xml
+                 addons/pvr.nextpvr/addon/addon.xml
+                 addons/pvr.njoy/addon/addon.xml
+                 addons/pvr.vdr.vnsi/addon/addon.xml
+                 addons/pvr.vuplus/addon/addon.xml
+                 addons/pvr.iptvsimple/addon/addon.xml])
 
-AC_OUTPUT([Makefile
-           lib/Makefile
-           lib/jsoncpp/Makefile
-           lib/libhts/Makefile
-           lib/tinyxml/Makefile
-           addons/Makefile
-           addons/pvr.demo/Makefile
-           addons/pvr.fortherecord.argus/Makefile
-           addons/pvr.hts/Makefile
-           addons/pvr.mediaportal.tvserver/Makefile
-           addons/pvr.njoy/Makefile
-           addons/pvr.vdr.vnsi/Makefile])
-
+AC_OUTPUT

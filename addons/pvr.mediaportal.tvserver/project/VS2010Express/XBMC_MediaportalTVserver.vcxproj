@@ -48,15 +48,13 @@
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">..\..\addon\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(Configuration)\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">XBMC_Mediaportal_win32</TargetName>
-    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">.pvr</TargetExt>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">XBMC_Mediaportal_win32</TargetName>
-    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">.pvr</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>..\..\..\..\xbmc;..\..\..\..\lib;..\..\..\..\lib\platform\windows;..\..\src</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>TARGET_WINDOWS;_WINSOCKAPI_;_DEBUG;_USE_32BIT_TIME_T;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>TARGET_WINDOWS;_WINSOCKAPI_;_DEBUG;_USE_32BIT_TIME_T;__STDC_FORMAT_MACROS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
@@ -84,7 +82,7 @@
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <AdditionalIncludeDirectories>..\..\..\..\xbmc;..\..\..\..\lib;..\..\..\..\lib\platform\windows;..\..\src</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>TARGET_WINDOWS;_WINSOCKAPI_;_USE_32BIT_TIME_T;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>TARGET_WINDOWS;_WINSOCKAPI_;_USE_32BIT_TIME_T;__STDC_FORMAT_MACROS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -127,7 +125,6 @@
     <ClCompile Include="..\..\src\lib\tsreader\FileReader.cpp" />
     <ClCompile Include="..\..\src\lib\tsreader\MultiFileReader.cpp" />
     <ClCompile Include="..\..\src\lib\tsreader\TSReader.cpp" />
-    <ClCompile Include="..\..\src\lib\tsreader\windows\File.cpp" />
     <ClCompile Include="..\..\src\pvrclient-mediaportal.cpp" />
     <ClCompile Include="..\..\src\recordings.cpp" />
     <ClCompile Include="..\..\src\Socket.cpp" />
@@ -145,18 +142,14 @@
     <ClInclude Include="..\..\src\FileUtils.h" />
     <ClInclude Include="..\..\src\GenreTable.h" />
     <ClInclude Include="..\..\src\lib\tsreader\FileReader.h" />
-    <ClInclude Include="..\..\src\lib\tsreader\IFile.h" />
     <ClInclude Include="..\..\src\lib\tsreader\MultiFileReader.h" />
     <ClInclude Include="..\..\src\lib\tsreader\TSReader.h" />
-    <ClInclude Include="..\..\src\lib\tsreader\windows\File.h" />
-    <ClInclude Include="..\..\src\os-dependent.h" />
     <ClInclude Include="..\..\src\pvrclient-mediaportal.h" />
     <ClInclude Include="..\..\src\recordings.h" />
     <ClInclude Include="..\..\src\Socket.h" />
     <ClInclude Include="..\..\src\timers.h" />
     <ClInclude Include="..\..\src\uri.h" />
     <ClInclude Include="..\..\src\utils.h" />
-    <ClInclude Include="..\..\src\windows\os_windows.h" />
     <ClInclude Include="..\..\src\windows\WindowsUtils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

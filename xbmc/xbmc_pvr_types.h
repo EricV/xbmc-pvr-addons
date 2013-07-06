@@ -1,6 +1,6 @@
 #pragma once
 /*
- *      Copyright (C) 2005-2012 Team XBMC
+ *      Copyright (C) 2005-2013 Team XBMC
  *      http://www.xbmc.org
  *
  *  This Program is free software; you can redistribute it and/or modify
@@ -14,16 +14,15 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with XBMC; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *  http://www.gnu.org/copyleft/gpl.html
+ *  along with XBMC; see the file COPYING.  If not, see
+ *  <http://www.gnu.org/licenses/>.
  *
  */
 
 #ifndef __PVRCLIENT_TYPES_H__
 #define __PVRCLIENT_TYPES_H__
 
-#ifdef _WIN32
+#ifdef TARGET_WINDOWS
 #include <windows.h>
 #else
 #ifndef __cdecl
@@ -34,6 +33,7 @@
 #endif
 #endif
 #include <string.h>
+#include <stdint.h>
 
 #include "xbmc_addon_types.h"
 #include "xbmc_epg_types.h"
@@ -68,15 +68,16 @@ struct DemuxPacket;
 #define PVR_ADDON_URL_STRING_LENGTH          1024
 #define PVR_ADDON_DESC_STRING_LENGTH         1024
 #define PVR_ADDON_INPUT_FORMAT_STRING_LENGTH 32
+#define PVR_ADDON_EDL_LENGTH                 32
 
 /* using the default avformat's MAX_STREAMS value to be safe */
 #define PVR_STREAM_MAX_STREAMS 20
 
 /* current PVR API version */
-#define XBMC_PVR_API_VERSION "1.2.0"
+#define XBMC_PVR_API_VERSION "1.8.0"
 
 /* min. PVR API version */
-#define XBMC_PVR_MIN_API_VERSION "1.2.0"
+#define XBMC_PVR_MIN_API_VERSION "1.8.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,13 +105,30 @@ extern "C" {
    */
   typedef enum
   {
-    PVR_TIMER_STATE_NEW       = 0, /*!< @brief a new, unsaved timer */
-    PVR_TIMER_STATE_SCHEDULED = 1, /*!< @brief the timer is scheduled for recording */
-    PVR_TIMER_STATE_RECORDING = 2, /*!< @brief the timer is currently recordings */
-    PVR_TIMER_STATE_COMPLETED = 3, /*!< @brief the recording completed successfully */
-    PVR_TIMER_STATE_ABORTED   = 4, /*!< @brief recording started, but was aborted */
-    PVR_TIMER_STATE_CANCELLED = 5  /*!< @brief the timer was scheduled, but was canceled */
+    PVR_TIMER_STATE_NEW          = 0, /*!< @brief a new, unsaved timer */
+    PVR_TIMER_STATE_SCHEDULED    = 1, /*!< @brief the timer is scheduled for recording */
+    PVR_TIMER_STATE_RECORDING    = 2, /*!< @brief the timer is currently recordings */
+    PVR_TIMER_STATE_COMPLETED    = 3, /*!< @brief the recording completed successfully */
+    PVR_TIMER_STATE_ABORTED      = 4, /*!< @brief recording started, but was aborted */
+    PVR_TIMER_STATE_CANCELLED    = 5, /*!< @brief the timer was scheduled, but was canceled */
+    PVR_TIMER_STATE_CONFLICT_OK  = 6, /*!< @brief the scheduled timer conflicts with another one, but will be recorded */
+    PVR_TIMER_STATE_CONFLICT_NOK = 7, /*!< @brief the scheduled timer conflicts with another one and won't be recorded */
+    PVR_TIMER_STATE_ERROR        = 8  /*!< @brief the timer is scheduled, but can't be recorded for some reason */
   } PVR_TIMER_STATE;
+
+  /*!
+   * @brief PVR menu hook categories
+   */
+  typedef enum
+  {
+    PVR_MENUHOOK_UNKNOWN         =-1, /*!< @brief unknown menu hook */
+    PVR_MENUHOOK_ALL             = 0, /*!< @brief all categories */
+    PVR_MENUHOOK_CHANNEL         = 1, /*!< @brief for channels */
+    PVR_MENUHOOK_TIMER           = 2, /*!< @brief for timers */
+    PVR_MENUHOOK_EPG             = 3, /*!< @brief for EPG */
+    PVR_MENUHOOK_RECORDING       = 4, /*!< @brief for recordings */
+    PVR_MENUHOOK_SETTING         = 5, /*!< @brief for settings */
+  } PVR_MENUHOOK_CAT;
 
   /*!
    * @brief Properties passed to the Create() method of an add-on.
@@ -139,6 +157,7 @@ extern "C" {
     bool bSupportsRecordingFolders;     /*!< @brief true if the backend supports timers / recordings in folders. */
     bool bSupportsRecordingPlayCount;   /*!< @brief true if the backend supports play count for recordings. */
     bool bSupportsLastPlayedPosition;   /*!< @brief true if the backend supports store/retrieve of last played position for recordings. */
+    bool bSupportsRecordingEdl;         /*!< @brief true if the backend supports retrieving an edit decision list for recordings. */
   } ATTRIBUTE_PACKED PVR_ADDON_CAPABILITIES;
 
   /*!
@@ -149,7 +168,6 @@ extern "C" {
     unsigned int iStreamCount;
     struct PVR_STREAM
     {
-      unsigned int iStreamIndex;       /*!< @brief (required) stream index */
       unsigned int iPhysicalId;        /*!< @brief (required) physical index */
       unsigned int iCodecType;         /*!< @brief (required) codec type id */
       unsigned int iCodecId;           /*!< @brief (required) codec id */
@@ -186,11 +204,13 @@ extern "C" {
 
   /*!
    * @brief Menu hooks that are available in the context menus while playing a stream via this add-on.
+   * And in the Live TV settings dialog
    */
   typedef struct PVR_MENUHOOK
   {
-    unsigned int iHookId;              /*!< @brief (required) this hook's identifier */
-    unsigned int iLocalizedStringId;   /*!< @brief (required) the id of the label for this hook in g_localizeStrings */
+    unsigned int     iHookId;              /*!< @brief (required) this hook's identifier */
+    unsigned int     iLocalizedStringId;   /*!< @brief (required) the id of the label for this hook in g_localizeStrings */
+    PVR_MENUHOOK_CAT category;             /*!< @brief (required) category of menu hook */
   } ATTRIBUTE_PACKED PVR_MENUHOOK;
 
   /*!
@@ -252,21 +272,57 @@ extern "C" {
    * @brief Representation of a recording.
    */
   typedef struct PVR_RECORDING {
-    char   strRecordingId[PVR_ADDON_NAME_STRING_LENGTH]; /*!< @brief (required) unique id of the recording on the client. */
-    char   strTitle[PVR_ADDON_NAME_STRING_LENGTH];       /*!< @brief (required) the title of this recording */
-    char   strStreamURL[PVR_ADDON_URL_STRING_LENGTH];    /*!< @brief (required) stream URL to access this recording */
-    char   strDirectory[PVR_ADDON_URL_STRING_LENGTH];    /*!< @brief (optional) directory of this recording on the client */
-    char   strPlotOutline[PVR_ADDON_DESC_STRING_LENGTH]; /*!< @brief (optional) plot outline */
-    char   strPlot[PVR_ADDON_DESC_STRING_LENGTH];        /*!< @brief (optional) plot */
-    char   strChannelName[PVR_ADDON_NAME_STRING_LENGTH]; /*!< @brief (optional) channel name */
-    time_t recordingTime;                                /*!< @brief (optional) start time of the recording */
-    int    iDuration;                                    /*!< @brief (optional) duration of the recording in seconds */
-    int    iPriority;                                    /*!< @brief (optional) priority of this recording (from 0 - 100) */
-    int    iLifetime;                                    /*!< @brief (optional) life time in days of this recording */
-    int    iGenreType;                                   /*!< @brief (optional) genre type */
-    int    iGenreSubType;                                /*!< @brief (optional) genre sub type */
-    int    iPlayCount;                                   /*!< @brief (optional) play count of this recording on the client */
+    char   strRecordingId[PVR_ADDON_NAME_STRING_LENGTH];  /*!< @brief (required) unique id of the recording on the client. */
+    char   strTitle[PVR_ADDON_NAME_STRING_LENGTH];        /*!< @brief (required) the title of this recording */
+    char   strStreamURL[PVR_ADDON_URL_STRING_LENGTH];     /*!< @brief (required) stream URL to access this recording */
+    char   strDirectory[PVR_ADDON_URL_STRING_LENGTH];     /*!< @brief (optional) directory of this recording on the client */
+    char   strPlotOutline[PVR_ADDON_DESC_STRING_LENGTH];  /*!< @brief (optional) plot outline */
+    char   strPlot[PVR_ADDON_DESC_STRING_LENGTH];         /*!< @brief (optional) plot */
+    char   strChannelName[PVR_ADDON_NAME_STRING_LENGTH];  /*!< @brief (optional) channel name */
+    char   strIconPath[PVR_ADDON_URL_STRING_LENGTH];      /*!< @brief (optional) icon path */
+    char   strThumbnailPath[PVR_ADDON_URL_STRING_LENGTH]; /*!< @brief (optional) thumbnail path */
+    char   strFanartPath[PVR_ADDON_URL_STRING_LENGTH];    /*!< @brief (optional) fanart path */
+    time_t recordingTime;                                 /*!< @brief (optional) start time of the recording */
+    int    iDuration;                                     /*!< @brief (optional) duration of the recording in seconds */
+    int    iPriority;                                     /*!< @brief (optional) priority of this recording (from 0 - 100) */
+    int    iLifetime;                                     /*!< @brief (optional) life time in days of this recording */
+    int    iGenreType;                                    /*!< @brief (optional) genre type */
+    int    iGenreSubType;                                 /*!< @brief (optional) genre sub type */
+    int    iPlayCount;                                    /*!< @brief (optional) play count of this recording on the client */
+    int    iLastPlayedPosition;                           /*!< @brief (optional) last played position of this recording on the client */
   } ATTRIBUTE_PACKED PVR_RECORDING;
+
+  /*!
+   * @brief Edit definition list (EDL)
+   */
+  typedef enum
+  {
+    PVR_EDL_TYPE_CUT      = 0, /*!< @brief cut (completly remove content) */
+    PVR_EDL_TYPE_MUTE     = 1, /*!< @brief mute audio */
+    PVR_EDL_TYPE_SCENE    = 2, /*!< @brief scene markers (chapter seeking) */
+    PVR_EDL_TYPE_COMBREAK = 3  /*!< @brief commercial breaks */
+  } PVR_EDL_TYPE;
+
+  typedef struct PVR_EDL_ENTRY
+  {
+    int64_t start;     // ms
+    int64_t end;       // ms
+    PVR_EDL_TYPE type;
+  } ATTRIBUTE_PACKED PVR_EDL_ENTRY;
+
+  /*!
+   * @brief PVR menu hook data
+   */
+  typedef struct PVR_MENUHOOK_DATA
+  {
+    PVR_MENUHOOK_CAT cat;
+    union data {
+      int iEpgUid;
+      PVR_CHANNEL channel;
+      PVR_TIMER timer;
+      PVR_RECORDING recording;
+    } data;
+  } ATTRIBUTE_PACKED PVR_MENUHOOK_DATA;
 
   /*!
    * @brief Structure to transfer the methods from xbmc_pvr_dll.h to XBMC
@@ -275,13 +331,15 @@ extern "C" {
   {
     const char*  (__cdecl* GetPVRAPIVersion)(void);
     const char*  (__cdecl* GetMininumPVRAPIVersion)(void);
+    const char*  (__cdecl* GetGUIAPIVersion)(void);
+    const char*  (__cdecl* GetMininumGUIAPIVersion)(void);
     PVR_ERROR    (__cdecl* GetAddonCapabilities)(PVR_ADDON_CAPABILITIES*);
     PVR_ERROR    (__cdecl* GetStreamProperties)(PVR_STREAM_PROPERTIES*);
     const char*  (__cdecl* GetBackendName)(void);
     const char*  (__cdecl* GetBackendVersion)(void);
     const char*  (__cdecl* GetConnectionString)(void);
     PVR_ERROR    (__cdecl* GetDriveSpace)(long long*, long long*);
-    PVR_ERROR    (__cdecl* MenuHook)(const PVR_MENUHOOK&);
+    PVR_ERROR    (__cdecl* MenuHook)(const PVR_MENUHOOK&, const PVR_MENUHOOK_DATA&);
     PVR_ERROR    (__cdecl* GetEpg)(ADDON_HANDLE, const PVR_CHANNEL&, time_t, time_t);
     int          (__cdecl* GetChannelGroupsAmount)(void);
     PVR_ERROR    (__cdecl* GetChannelGroups)(ADDON_HANDLE, bool);
@@ -301,6 +359,7 @@ extern "C" {
     PVR_ERROR    (__cdecl* SetRecordingPlayCount)(const PVR_RECORDING&, int);
     PVR_ERROR    (__cdecl* SetRecordingLastPlayedPosition)(const PVR_RECORDING&, int);
     int          (__cdecl* GetRecordingLastPlayedPosition)(const PVR_RECORDING&);
+    PVR_ERROR    (__cdecl* GetRecordingEdl)(const PVR_RECORDING&, PVR_EDL_ENTRY[], int*);
     int          (__cdecl* GetTimersAmount)(void);
     PVR_ERROR    (__cdecl* GetTimers)(ADDON_HANDLE);
     PVR_ERROR    (__cdecl* AddTimer)(const PVR_TIMER&);
@@ -327,6 +386,11 @@ extern "C" {
     void         (__cdecl* DemuxFlush)(void);
     DemuxPacket* (__cdecl* DemuxRead)(void);
     unsigned int (__cdecl* GetChannelSwitchDelay)(void);
+    bool         (__cdecl* CanPauseStream)(void);
+    void         (__cdecl* PauseStream)(bool);
+    bool         (__cdecl* CanSeekStream)(void);
+    bool         (__cdecl* SeekTime)(int, bool, double*);
+    void         (__cdecl* SetSpeed)(int);
   } PVRClient;
 
 #ifdef __cplusplus

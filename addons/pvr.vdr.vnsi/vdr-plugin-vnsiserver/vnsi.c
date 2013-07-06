@@ -26,10 +26,15 @@
 #include <getopt.h>
 #include <vdr/plugin.h>
 #include "vnsi.h"
+#include "vnsicommand.h"
+#include "setup.h"
+
+cPluginVNSIServer* cPluginVNSIServer::VNSIServer = NULL;
 
 cPluginVNSIServer::cPluginVNSIServer(void)
 {
   Server = NULL;
+  VNSIServer = NULL;
 }
 
 cPluginVNSIServer::~cPluginVNSIServer()
@@ -66,6 +71,8 @@ bool cPluginVNSIServer::Initialize(void)
 {
   // Initialize any background activities the plugin shall perform.
   VNSIServerConfig.ConfigDirectory = ConfigDirectory(PLUGIN_NAME_I18N);
+
+  VNSIServer = this;
   return true;
 }
 
@@ -108,13 +115,25 @@ time_t cPluginVNSIServer::WakeupTime(void)
 cMenuSetupPage *cPluginVNSIServer::SetupMenu(void)
 {
   // Return a setup menu in case the plugin supports one.
-  return NULL;
+  return new cMenuSetupVNSI;
 }
 
 bool cPluginVNSIServer::SetupParse(const char *Name, const char *Value)
 {
   // Parse your own setup parameters and store their values.
-  return false;
+  if (!strcasecmp(Name, CONFNAME_PMTTIMEOUT))
+    PmtTimeout = atoi(Value);
+  else if (!strcasecmp(Name, CONFNAME_TIMESHIFT))
+    TimeshiftMode = atoi(Value);
+  else if (!strcasecmp(Name, CONFNAME_TIMESHIFTBUFFERSIZE))
+    TimeshiftBufferSize = atoi(Value);
+  else if (!strcasecmp(Name, CONFNAME_TIMESHIFTBUFFERFILESIZE))
+    TimeshiftBufferFileSize = atoi(Value);
+  else if (!strcasecmp(Name, CONFNAME_TIMESHIFTBUFFERDIR))
+    strn0cpy(TimeshiftBufferDir, Value, sizeof(TimeshiftBufferDir));
+  else
+    return false;
+  return true;
 }
 
 bool cPluginVNSIServer::Service(const char *Id, void *Data)
@@ -133,6 +152,18 @@ cString cPluginVNSIServer::SVDRPCommand(const char *Command, const char *Option,
 {
   // Process SVDRP commands this plugin implements
   return NULL;
+}
+
+void cPluginVNSIServer::StoreSetup(const char *Name, int Value)
+{
+  if (VNSIServer)
+  {
+    if (VNSIServer->SetupParse(Name, itoa(Value)))
+    {
+      VNSIServer->SetupStore(Name, Value);
+      Setup.Save();
+    }
+  }
 }
 
 VDRPLUGINCREATOR(cPluginVNSIServer); // Don't touch this!

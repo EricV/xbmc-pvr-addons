@@ -31,6 +31,7 @@ cBitstream::cBitstream(uint8_t *data, int bits)
   m_data   = data;
   m_offset = 0;
   m_len    = bits;
+  m_error  = false;
 }
 
 void cBitstream::setBitstream(uint8_t *data, int bits)
@@ -38,6 +39,7 @@ void cBitstream::setBitstream(uint8_t *data, int bits)
   m_data   = data;
   m_offset = 0;
   m_len    = bits;
+  m_error  = false;
 }
 
 void cBitstream::skipBits(int num)
@@ -52,7 +54,10 @@ unsigned int cBitstream::readBits(int num)
   while(num > 0)
   {
     if(m_offset >= m_len)
+    {
+      m_error = true;
       return 0;
+    }
 
     num--;
 
@@ -72,7 +77,10 @@ unsigned int cBitstream::showBits(int num)
   while(num > 0)
   {
     if(offs >= m_len)
+    {
+      m_error = true;
       return 0;
+    }
 
     num--;
 
@@ -84,26 +92,31 @@ unsigned int cBitstream::showBits(int num)
   return r;
 }
 
-unsigned int cBitstream::readGolombUE()
+unsigned int cBitstream::readGolombUE(int maxbits)
 {
   int lzb = -1;
+  int bits = 0;
 
-  for(int b = 0; !b; lzb++)
+  for(int b = 0; !b; lzb++, bits++)
+  {
+    if (bits > maxbits)
+      return 0;
     b = readBits1();
+  }
 
   return (1 << lzb) - 1 + readBits(lzb);
 }
 
 signed int cBitstream::readGolombSE()
 {
-  int v, neg;
+  int v, pos;
   v = readGolombUE();
   if(v == 0)
     return 0;
 
-  neg = v & 1;
+  pos = (v & 1);
   v = (v + 1) >> 1;
-  return neg ? -v : v;
+  return pos ? v : -v;
 }
 
 
@@ -117,7 +130,10 @@ void cBitstream::putBits(int val, int num)
 {
   while(num > 0) {
     if(m_offset >= m_len)
+    {
+      m_error = true;
       return;
+    }
 
     num--;
 

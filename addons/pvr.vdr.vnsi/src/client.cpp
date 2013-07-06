@@ -25,6 +25,8 @@
 #include "VNSIRecording.h"
 #include "VNSIData.h"
 #include "VNSIChannelScan.h"
+#include "VNSIAdmin.h"
+#include "platform/util/util.h"
 
 #include <sstream>
 #include <string>
@@ -33,7 +35,6 @@
 using namespace std;
 using namespace ADDON;
 
-bool m_bCreated               = false;
 ADDON_STATUS m_CurStatus      = ADDON_STATUS_UNKNOWN;
 
 /* User adjustable settings are saved here.
@@ -47,6 +48,7 @@ bool          g_bHandleMessages         = DEFAULT_HANDLE_MSG;   ///< Send VDR's 
 int           g_iConnectTimeout         = DEFAULT_TIMEOUT;      ///< The Socket connection timeout
 int           g_iPriority               = DEFAULT_PRIORITY;     ///< The Priority this client have in response to other clients
 bool          g_bAutoChannelGroups      = DEFAULT_AUTOGROUPS;
+int           g_iTimeshift              = 1;
 
 CHelper_libXBMC_addon *XBMC   = NULL;
 CHelper_libXBMC_gui   *GUI    = NULL;
@@ -70,23 +72,25 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
   XBMC = new CHelper_libXBMC_addon;
   if (!XBMC->RegisterMe(hdl))
   {
-    delete XBMC;
-    XBMC = NULL;
-    return ADDON_STATUS_UNKNOWN;
+    SAFE_DELETE(XBMC);
+    return ADDON_STATUS_PERMANENT_FAILURE;
   }
 
   GUI = new CHelper_libXBMC_gui;
   if (!GUI->RegisterMe(hdl))
-    return ADDON_STATUS_UNKNOWN;
+  {
+    SAFE_DELETE(GUI);
+    SAFE_DELETE(XBMC);
+    return ADDON_STATUS_PERMANENT_FAILURE;
+  }
 
   PVR = new CHelper_libXBMC_pvr;
   if (!PVR->RegisterMe(hdl))
   {
-    delete PVR;
-    delete XBMC;
-    PVR = NULL;
-    XBMC = NULL;
-    return ADDON_STATUS_UNKNOWN;
+    SAFE_DELETE(PVR);
+    SAFE_DELETE(GUI);
+    SAFE_DELETE(XBMC);
+    return ADDON_STATUS_PERMANENT_FAILURE;
   }
 
   XBMC->Log(LOG_DEBUG, "Creating VDR VNSI PVR-Client");
@@ -121,6 +125,14 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
     /* If setting is unknown fallback to defaults */
     XBMC->Log(LOG_ERROR, "Couldn't get 'priority' setting, falling back to %i as default", DEFAULT_PRIORITY);
     g_iPriority = DEFAULT_PRIORITY;
+  }
+
+  /* Read setting "timeshift" from settings.xml */
+  if (!XBMC->GetSetting("timeshift", &g_iTimeshift))
+  {
+    /* If setting is unknown fallback to defaults */
+    XBMC->Log(LOG_ERROR, "Couldn't get 'timeshift' setting, falling back to %i as default", 1);
+    g_iTimeshift = 1;
   }
 
   /* Read setting "convertchar" from settings.xml */
@@ -158,30 +170,32 @@ ADDON_STATUS ADDON_Create(void* hdl, void* props)
   VNSIData = new cVNSIData;
   if (!VNSIData->Open(g_szHostname, g_iPort))
   {
-    delete VNSIData;
-    delete PVR;
-    delete XBMC;
-    VNSIData = NULL;
-    PVR = NULL;
-    XBMC = NULL;
+    ADDON_Destroy();
     m_CurStatus = ADDON_STATUS_LOST_CONNECTION;
     return m_CurStatus;
   }
 
   if (!VNSIData->Login())
   {
+    ADDON_Destroy();
     m_CurStatus = ADDON_STATUS_LOST_CONNECTION;
     return m_CurStatus;
   }
 
   if (!VNSIData->EnableStatusInterface(g_bHandleMessages))
   {
+    ADDON_Destroy();
     m_CurStatus = ADDON_STATUS_LOST_CONNECTION;
     return m_CurStatus;
   }
 
+  PVR_MENUHOOK hook;
+  hook.iHookId = 1;
+  hook.category = PVR_MENUHOOK_SETTING;
+  hook.iLocalizedStringId = 30107;
+  PVR->AddMenuHook(&hook);
+
   m_CurStatus = ADDON_STATUS_OK;
-  m_bCreated = true;
   return m_CurStatus;
 }
 
@@ -192,23 +206,23 @@ ADDON_STATUS ADDON_GetStatus()
 
 void ADDON_Destroy()
 {
-  if (m_bCreated)
-  {
-    delete VNSIData;
-    VNSIData = NULL;
-  }
+  if (VNSIDemuxer)
+    SAFE_DELETE(VNSIDemuxer);
+
+  if (VNSIRecording)
+    SAFE_DELETE(VNSIRecording);
+
+  if (VNSIData)
+    SAFE_DELETE(VNSIData);
 
   if (PVR)
-  {
-    delete PVR;
-    PVR = NULL;
-  }
+    SAFE_DELETE(PVR);
+
+  if (GUI)
+    SAFE_DELETE(GUI);
 
   if (XBMC)
-  {
-    delete XBMC;
-    XBMC = NULL;
-  }
+    SAFE_DELETE(XBMC);
 
   m_CurStatus = ADDON_STATUS_UNKNOWN;
 }
@@ -249,6 +263,11 @@ ADDON_STATUS ADDON_SetSetting(const char *settingName, const void *settingValue)
     XBMC->Log(LOG_INFO, "Changed Setting 'priority' from %u to %u", g_iPriority, *(int*) settingValue);
     g_iPriority = *(int*) settingValue;
   }
+  else if (str == "timeshift")
+  {
+    XBMC->Log(LOG_INFO, "Changed Setting 'timeshift' from %u to %u", g_iTimeshift, *(int*) settingValue);
+    g_iPriority = *(int*) settingValue;
+  }
   else if (str == "convertchar")
   {
     XBMC->Log(LOG_INFO, "Changed Setting 'convertchar' from %u to %u", g_bCharsetConv, *(bool*) settingValue);
@@ -287,6 +306,10 @@ void ADDON_FreeSettings()
 
 }
 
+void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
+{
+}
+
 /***********************************************************
  * PVR Client AddOn specific public library functions
  ***********************************************************/
@@ -301,6 +324,18 @@ const char* GetMininumPVRAPIVersion(void)
 {
   static const char *strMinApiVersion = XBMC_PVR_MIN_API_VERSION;
   return strMinApiVersion;
+}
+
+const char* GetGUIAPIVersion(void)
+{
+  static const char *strGuiApiVersion = XBMC_GUI_API_VERSION;
+  return strGuiApiVersion;
+}
+
+const char* GetMininumGUIAPIVersion(void)
+{
+  static const char *strMinGuiApiVersion = XBMC_GUI_MIN_API_VERSION;
+  return strMinGuiApiVersion;
 }
 
 PVR_ERROR GetAddonCapabilities(PVR_ADDON_CAPABILITIES* pCapabilities)
@@ -575,6 +610,32 @@ PVR_ERROR SignalStatus(PVR_SIGNAL_STATUS &signalStatus)
 
 }
 
+bool CanPauseStream(void)
+{
+  bool ret = false;
+  if (VNSIDemuxer)
+    ret = VNSIDemuxer->IsTimeshift();
+  return ret;
+}
+
+bool CanSeekStream(void)
+{
+  bool ret = false;
+  if (VNSIDemuxer)
+    ret = VNSIDemuxer->IsTimeshift();
+  return ret;
+}
+
+bool SeekTime(int time, bool backwards, double *startpts)
+{
+  bool ret = false;
+  if (VNSIDemuxer)
+    ret = VNSIDemuxer->SeekTime(time, backwards, startpts);
+  return ret;
+}
+
+void SetSpeed(int) {};
+void PauseStream(bool bPaused) {}
 
 /*******************************************/
 /** PVR Recording Stream Functions        **/
@@ -632,8 +693,20 @@ long long LengthRecordedStream(void)
   return 0;
 }
 
+/*******************************************/
+/** PVR Menu Hook Functions               **/
+
+PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook, const PVR_MENUHOOK_DATA &item)
+{
+  if (menuhook.iHookId == 1)
+  {
+    cVNSIAdmin osd;
+    osd.Open(g_szHostname, g_iPort);
+  }
+  return PVR_ERROR_NO_ERROR;
+}
+
 /** UNUSED API FUNCTIONS */
-PVR_ERROR CallMenuHook(const PVR_MENUHOOK &menuhook) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR DeleteChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR RenameChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR MoveChannel(const PVR_CHANNEL &channel) { return PVR_ERROR_NOT_IMPLEMENTED; }
@@ -649,5 +722,7 @@ const char * GetLiveStreamURL(const PVR_CHANNEL &channel) { return ""; }
 PVR_ERROR SetRecordingPlayCount(const PVR_RECORDING &recording, int count) { return PVR_ERROR_NOT_IMPLEMENTED; }
 PVR_ERROR SetRecordingLastPlayedPosition(const PVR_RECORDING &recording, int lastplayedposition) { return PVR_ERROR_NOT_IMPLEMENTED; }
 int GetRecordingLastPlayedPosition(const PVR_RECORDING &recording) { return -1; }
+PVR_ERROR GetRecordingEdl(const PVR_RECORDING&, PVR_EDL_ENTRY[], int*) { return PVR_ERROR_NOT_IMPLEMENTED; };
 unsigned int GetChannelSwitchDelay(void) { return 0; }
+
 }

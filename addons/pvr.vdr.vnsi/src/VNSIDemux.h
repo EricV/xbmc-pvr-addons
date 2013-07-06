@@ -23,6 +23,7 @@
 #include "VNSISession.h"
 #include "client.h"
 #include <string>
+#include <map>
 
 class cResponsePacket;
 
@@ -50,6 +51,8 @@ public:
   bool SwitchChannel(const PVR_CHANNEL &channelinfo);
   int CurrentChannel() { return m_channelinfo.iChannelNumber; }
   bool GetSignalStatus(PVR_SIGNAL_STATUS &qualityinfo);
+  bool IsTimeshift() { return m_bTimeshift; }
+  bool SeekTime(int time, bool backwards, double *startpts);
 
 protected:
 
@@ -63,4 +66,7 @@ private:
   PVR_STREAM_PROPERTIES m_Streams;
   PVR_CHANNEL           m_channelinfo;
   SQuality              m_Quality;
+  std::map<int, unsigned int> m_StreamIndex;
+  bool m_bTimeshift;
+  uint32_t m_MuxPacketSerial;
 };

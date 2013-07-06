@@ -44,12 +44,14 @@ namespace PLATFORM
         CCommonSocket<tcp_socket_t>(INVALID_SOCKET_VALUE, strHostname),
         m_iPort(iPort) {}
 
-      virtual ~CTcpSocket(void) {}
+      virtual ~CTcpSocket(void) { Close(); }
 
       virtual bool Open(uint64_t iTimeoutMs = 0)
       {
         bool bReturn(false);
         struct addrinfo *address(NULL), *addr(NULL);
+        m_strError.clear();
+        m_iError = 0;
         if (!TcpResolveAddress(m_strName.c_str(), m_iPort, &m_iError, &address))
         {
           m_strError = strerror(m_iError);

@@ -1,5 +1,5 @@
 /*
- *      Copyright (C) 2005-2012 Team XBMC
+ *      Copyright (C) 2005-2013 Team XBMC
  *      http://www.xbmc.org
  *
  *  This Program is free software; you can redistribute it and/or modify
@@ -13,9 +13,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with XBMC; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *  http://www.gnu.org/copyleft/gpl.html
+ *  along with XBMC; see the file COPYING.  If not, see
+ *  <http://www.gnu.org/licenses/>.
  *
  */
 
@@ -50,6 +49,22 @@ extern "C"
    * @remarks Valid implementation required.
    */
   const char* GetMininumPVRAPIVersion(void);
+
+  /*!
+   * Get the XBMC_GUI_API_VERSION that was used to compile this add-on.
+   * Used to check if this add-on is compatible with XBMC.
+   * @return The XBMC_GUI_API_VERSION that was used to compile this add-on.
+   * @remarks Valid implementation required.
+   */
+  const char* GetGUIAPIVersion(void);
+
+  /*!
+   * Get the XBMC_GUI_MIN_API_VERSION that was used to compile this add-on.
+   * Used to check if this add-on is compatible with XBMC.
+   * @return The XBMC_GUI_MIN_API_VERSION that was used to compile this add-on.
+   * @remarks Valid implementation required.
+   */
+  const char* GetMininumGUIAPIVersion(void);
 
   /*!
    * Get the list of features that this add-on provides.
@@ -93,10 +108,11 @@ extern "C"
    * Call one of the menu hooks (if supported).
    * Supported PVR_MENUHOOK instances have to be added in ADDON_Create(), by calling AddMenuHook() on the callback.
    * @param menuhook The hook to call.
+   * @param item The selected item for which the hook was called.
    * @return PVR_ERROR_NO_ERROR if the hook was called successfully.
    * @remarks Optional. Return PVR_ERROR_NOT_IMPLEMENTED if this add-on won't provide this function.
    */
-  PVR_ERROR CallMenuHook(const PVR_MENUHOOK& menuhook);
+  PVR_ERROR CallMenuHook(const PVR_MENUHOOK& menuhook, const PVR_MENUHOOK_DATA &item);
   //@}
 
   /*! @name PVR EPG methods
@@ -284,6 +300,16 @@ extern "C"
   * @remarks Required if bSupportsRecordingPlayCount is set to true. Return -1 if this add-on won't provide this function.
   */
   int GetRecordingLastPlayedPosition(const PVR_RECORDING& recording);
+
+  /*!
+  * Retrieve the edit decision list (EDL) of a recording on the backend.
+  * @param recording The recording.
+  * @param edl out: The function has to write the EDL list into this array.
+  * @param size in: The maximum size of the EDL, out: the actual size of the EDL.
+  * @return PVR_ERROR_NO_ERROR if the EDL was successfully read.
+  * @remarks Required if bSupportsRecordingEdl is set to true. Return PVR_ERROR_NOT_IMPLEMENTED if this add-on won't provide this function.
+  */
+  PVR_ERROR GetRecordingEdl(const PVR_RECORDING&, PVR_EDL_ENTRY edl[], int *size);
 
   //@}
   /** @name PVR timer methods
@@ -514,6 +540,42 @@ extern "C"
   unsigned int GetChannelSwitchDelay(void);
 
   /*!
+   * Check if the backend support pausing the currently playing stream
+   * This will enable/disable the pause button in XBMC based on the return value
+   * @return false if the PVR addon/backend does not support pausing, true if possible
+   */
+  bool CanPauseStream();
+
+  /*!
+   * Check if the backend supports seeking for the currently playing stream
+   * This will enable/disable the rewind/forward buttons in XBMC based on the return value
+   * @return false if the PVR addon/backend does not support seeking, true if possible
+   */
+  bool CanSeekStream();
+
+  /*!
+   * @brief Notify the pvr addon that XBMC (un)paused the currently playing stream
+   */
+  void PauseStream(bool bPaused);
+
+  /*!
+   * Notify the pvr addon/demuxer that XBMC wishes to seek the stream by time
+   * @param time The absolute time since stream start
+   * @param backwards True to seek to keyframe BEFORE time, else AFTER
+   * @param startpts can be updated to point to where display should start
+   * @return True if the seek operation was possible
+   * @remarks Optional, and only used if addon has its own demuxer. Return False if this add-on won't provide this function.
+   */
+  bool SeekTime(int time, bool backwards, double *startpts);
+
+  /*!
+   * Notify the pvr addon/demuxer that XBMC wishes to change playback speed
+   * @param speed The requested playback speed
+   * @remarks Optional, and only used if addon has its own demuxer.
+   */
+  void SetSpeed(int speed);
+
+  /*!
    * Called by XBMC to assign the function pointers of this add-on to pClient.
    * @param pClient The struct to assign the function pointers to.
    */
@@ -521,6 +583,8 @@ extern "C"
   {
     pClient->GetPVRAPIVersion               = GetPVRAPIVersion;
     pClient->GetMininumPVRAPIVersion        = GetMininumPVRAPIVersion;
+    pClient->GetGUIAPIVersion               = GetGUIAPIVersion;
+    pClient->GetMininumGUIAPIVersion        = GetMininumGUIAPIVersion;
     pClient->GetAddonCapabilities           = GetAddonCapabilities;
     pClient->GetStreamProperties            = GetStreamProperties;
     pClient->GetConnectionString            = GetConnectionString;
@@ -551,6 +615,7 @@ extern "C"
     pClient->SetRecordingPlayCount          = SetRecordingPlayCount;
     pClient->SetRecordingLastPlayedPosition = SetRecordingLastPlayedPosition;
     pClient->GetRecordingLastPlayedPosition = GetRecordingLastPlayedPosition;
+    pClient->GetRecordingEdl                = GetRecordingEdl;
 
     pClient->GetTimersAmount                = GetTimersAmount;
     pClient->GetTimers                      = GetTimers;
@@ -569,6 +634,11 @@ extern "C"
     pClient->SignalStatus                   = SignalStatus;
     pClient->GetLiveStreamURL               = GetLiveStreamURL;
     pClient->GetChannelSwitchDelay          = GetChannelSwitchDelay;
+    pClient->CanPauseStream                 = CanPauseStream;
+    pClient->PauseStream                    = PauseStream;
+    pClient->CanSeekStream                  = CanSeekStream;
+    pClient->SeekTime                       = SeekTime;
+    pClient->SetSpeed                       = SetSpeed;
 
     pClient->OpenRecordedStream             = OpenRecordedStream;
     pClient->CloseRecordedStream            = CloseRecordedStream;

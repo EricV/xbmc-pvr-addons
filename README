@@ -1,7 +1,5 @@
-WARNING: this is work in progress. Don't try to use this unless you know what you're doing.
-
 =============================
-            Linux
+       Linux, OS-X, BSD
 =============================
 
 Start by executing:
@@ -15,10 +13,25 @@ To build all PVR add-ons as .zip archives:
 ./configure
 make zip
 
-=============================
-            OS-X
-=============================
-TODO
+Building addons with dependencies:
+----------------------------------
+The build method described above excludes addons that depend on runtime libraries.
+This is because the installed versions of the dependend libraries on the build-machine
+and the target machine have to match exactly. Therefore this addons cannot be
+distributed easily.
+
+Distribution package maintainers and users who build the addons on their target machine
+can enable the build of addons with dependencies:
+
+./configure --enable-addons-with-dependencies
+
+List of addons with dependencies:
+---------------------------------
+- MythTV addon:
+    Build dependencies:   libmysqlclient, boost (headers)
+    Runtime dependencies: libmysqlclient
+- IPTV Simple addon:
+    Build dependencies:   zlib
 
 =============================
            Windows
@@ -28,8 +41,7 @@ Building the pvr addons standalone:
 Prepare:
 1) Install Visual C++ Express 2010 (follow the instructions on the wiki for XBMC itself)
 Compile:
-2) Download the build dependencies.
-   Run the following batch file: project\BuildDependences\DownloadBuildDeps.bat
+2) Run project\BuildDependencies\DownloadBuildDeps.bat
 3) Open this solution from project\VS2010Express\xbmc-pvr-addons.sln
 4) Select the wanted configuration "Debug" or "Release"
 5) Press F7 to build the solution

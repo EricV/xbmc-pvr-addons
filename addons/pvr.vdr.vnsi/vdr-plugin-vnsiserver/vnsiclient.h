@@ -44,6 +44,7 @@ class cRequestPacket;
 class cResponsePacket;
 class cRecPlayer;
 class cCmdControl;
+class cVnsiOsdProvider;
 
 class cVNSIClient : public cThread
                   , public cStatus
@@ -64,6 +65,8 @@ private:
   uint32_t         m_protocolVersion;
   cMutex           m_msgLock;
   static cMutex    m_timerLock;
+  cVnsiOsdProvider *m_Osd;
+  std::map<int, time_t> m_epgUpdate;
 
 protected:
 
@@ -83,6 +86,7 @@ public:
   void ChannelChange();
   void RecordingsChange();
   void TimerChange();
+  void EpgChange();
 
   unsigned int GetID() { return m_Id; }
 
@@ -90,7 +94,7 @@ protected:
 
   void SetLoggedIn(bool yesNo) { m_loggedIn = yesNo; }
   void SetStatusInterface(bool yesNo) { m_StatusInterfaceEnabled = yesNo; }
-  bool StartChannelStreaming(const cChannel *channel, uint32_t timeout);
+  bool StartChannelStreaming(const cChannel *channel, int32_t priority, uint8_t timeshift, uint32_t timeout);
   void StopChannelStreaming();
 
 private:
@@ -107,9 +111,12 @@ private:
   bool process_GetTime();
   bool process_EnableStatusInterface();
   bool process_Ping();
+  bool process_GetSetup();
+  bool process_StoreSetup();
 
   bool processChannelStream_Open();
   bool processChannelStream_Close();
+  bool processChannelStream_Seek();
 
   bool processRecStream_Open();
   bool processRecStream_Close();
@@ -163,6 +170,9 @@ private:
   static cResponsePacket *m_processSCAN_Response;
   static cxSocket *m_processSCAN_Socket;
 
+  bool processOSD_Connect();
+  bool processOSD_Disconnect();
+  bool processOSD_Hitkey();
 };
 
 #endif // VNSI_CLIENT_H

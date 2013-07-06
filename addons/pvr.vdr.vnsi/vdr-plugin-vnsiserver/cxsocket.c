@@ -41,6 +41,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <netinet/tcp.h>
+#include <net/if.h>
 
 #include <vdr/config.h>
 #include <vdr/tools.h>
@@ -62,11 +63,30 @@ void cxSocket::close() {
   }
 }
 
+void cxSocket::Shutdown()
+{
+  if(m_fd >= 0)
+  {
+    ::shutdown(m_fd, SHUT_RD);
+  }
+}
+
+void cxSocket::LockWrite()
+{
+  m_MutexWrite.Lock();
+}
+
+void cxSocket::UnlockWrite()
+{
+  m_MutexWrite.Unlock();
+}
+
 ssize_t cxSocket::write(const void *buffer, size_t size, int timeout_ms, bool more_data)
 {
-  cMutexLock CmdLock((cMutex*)&m_MutexWrite);
+  cMutexLock CmdLock(&m_MutexWrite);
 
-  if(m_fd == -1) return -1;
+  if(m_fd == -1)
+    return -1;
 
   ssize_t written = (ssize_t)size;
   const unsigned char *ptr = (const unsigned char *)buffer;
@@ -79,7 +99,7 @@ ssize_t cxSocket::write(const void *buffer, size_t size, int timeout_ms, bool mo
       return written-size;
     }
 
-    ssize_t p = ::send(m_fd, ptr, size, MSG_NOSIGNAL | (more_data ? MSG_MORE : 0));
+    ssize_t p = ::send(m_fd, ptr, size, (more_data ? MSG_MORE : 0));
 
     if (p <= 0)
     {
@@ -88,7 +108,8 @@ ssize_t cxSocket::write(const void *buffer, size_t size, int timeout_ms, bool mo
         DEBUGLOG("cxSocket::write: EINTR during write(), retrying");
         continue;
       }
-      ERRORLOG("cxSocket::write: write() error");
+      else if (errno != EPIPE)
+        ERRORLOG("cxSocket::write: write() error");
       return p;
     }
 
@@ -101,11 +122,10 @@ ssize_t cxSocket::write(const void *buffer, size_t size, int timeout_ms, bool mo
 
 ssize_t cxSocket::read(void *buffer, size_t size, int timeout_ms)
 {
-  cMutexLock CmdLock((cMutex*)&m_MutexRead);
-
   int retryCounter = 0;
 
-  if(m_fd == -1) return -1;
+  if(m_fd == -1)
+    return -1;
 
   ssize_t missing = (ssize_t)size;
   unsigned char *ptr = (unsigned char *)buffer;
@@ -120,7 +140,7 @@ ssize_t cxSocket::read(void *buffer, size_t size, int timeout_ms)
 
     ssize_t p = ::read(m_fd, ptr, missing);
 
-    if (p <= 0)
+    if (p < 0)
     {
       if (retryCounter < 10 && (errno == EINTR || errno == EAGAIN))
       {
@@ -129,7 +149,12 @@ ssize_t cxSocket::read(void *buffer, size_t size, int timeout_ms)
         continue;
       }
       ERRORLOG("cxSocket::read: read() error at %d/%d", (int)(size-missing), (int)size);
-      return size-missing;
+      return 0;
+    }
+    else if (p == 0)
+    {
+      INFOLOG("cxSocket::read: eof, connection closed");
+      return 0;
     }
 
     retryCounter = 0;
@@ -140,7 +165,7 @@ ssize_t cxSocket::read(void *buffer, size_t size, int timeout_ms)
   return size;
 }
 
-void cxSocket::set_handle(int h) {
+void cxSocket::SetHandle(int h) {
   if(h != m_fd) {
     close();
     m_fd = h;
@@ -150,9 +175,6 @@ void cxSocket::set_handle(int h) {
     m_pollerWrite = new cPoller(m_fd, true);
   }
 }
-
-#include <sys/ioctl.h>
-#include <net/if.h>
 
 char *cxSocket::ip2txt(uint32_t ip, unsigned int port, char *str)
 {

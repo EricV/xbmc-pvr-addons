@@ -20,6 +20,8 @@
  */
 
 #include "HTSPData.h"
+#include "HTSPDemux.h"
+#include "platform/util/util.h"
 
 extern "C" {
 #include "platform/util/atomic.h"
@@ -41,9 +43,12 @@ using namespace PLATFORM;
 
 CHTSPData::CHTSPData()
 {
-  m_session = new CHTSPConnection();
+  m_session                     = NULL;
   m_bDisconnectWarningDisplayed = false;
-  m_bIsStarted = false;
+  m_bIsStarted                  = false;
+  m_recordingId                 = 0;
+  m_demux                       = NULL;
+  m_recordingBuf.alloc(1000000);
 }
 
 CHTSPData::~CHTSPData()
@@ -54,6 +59,9 @@ CHTSPData::~CHTSPData()
 
 bool CHTSPData::Open()
 {
+  if (!m_session)
+    m_session = new CHTSPConnection(this);
+
   CLockObject lock(m_mutex);
   if(!m_session->Connect())
   {
@@ -61,47 +69,25 @@ bool CHTSPData::Open()
     return false;
   }
 
+  if (!m_demux)
+    m_demux = new CHTSPDemux(m_session);
+
   if(!SendEnableAsync())
   {
     XBMC->Log(LOG_ERROR, "%s - couldn't send EnableAsync().", __FUNCTION__);
     return false;
   }
 
-  CreateThread();
-  m_started.Wait(m_mutex, m_bIsStarted, g_iConnectTimeout * 1000);
-
-  return IsRunning();
+  return m_started.Wait(m_mutex, m_bIsStarted, g_iConnectTimeout * 1000);
 }
 
 void CHTSPData::Close()
 {
-  m_session->Close();
-  StopThread();
-}
-
-bool CHTSPData::CheckConnection(void)
-{
-  bool bReturn(true);
-
-  if (!m_session->IsConnected() && m_bCreated && !IsStopped())
-  {
-    if (!m_bDisconnectWarningDisplayed)
-    {
-      m_bDisconnectWarningDisplayed = true;
-      CStdString strNotification(XBMC->GetLocalizedString(30500));
-      XBMC->QueueNotification(QUEUE_ERROR, strNotification, m_session->GetServerName());
-    }
-
-    if ((bReturn = m_session->Connect() && SendEnableAsync()))
-    {
-      m_bDisconnectWarningDisplayed = false;
-      /* notify the user that the connection has been restored */
-      CStdString strNotification(XBMC->GetLocalizedString(30501));
-      XBMC->QueueNotification(QUEUE_INFO, strNotification, m_session->GetServerName());
-    }
-  }
-
-  return bReturn;
+  CLockObject lock(m_mutex);
+  m_bIsStarted = false;
+  m_started.Broadcast();
+  SAFE_DELETE(m_demux);
+  SAFE_DELETE(m_session);
 }
 
 void CHTSPData::ReadResult(htsmsg_t *m, CHTSResult &result)
@@ -113,33 +99,7 @@ void CHTSPData::ReadResult(htsmsg_t *m, CHTSResult &result)
     return;
   }
 
-  uint32_t seq = mvp_atomic_inc(&g_iPacketSequence);
-
-  SMessage &message(m_queue[seq]);
-  message.event = new CEvent;
-  message.msg   = NULL;
-
-  htsmsg_add_u32(m, "seq", seq);
-  if(!m_session->TransmitMessage(m))
-  {
-    XBMC->Log(LOG_ERROR, "%s - failed to send command", __FUNCTION__);
-    result.status = PVR_ERROR_UNKNOWN;
-  }
-  else if(!message.event->Wait(g_iResponseTimeout * 1000))
-  {
-    XBMC->Log(LOG_ERROR, "%s - request timed out after %d seconds", __FUNCTION__, g_iResponseTimeout);
-    result.status = PVR_ERROR_SERVER_TIMEOUT;
-  }
-  else
-  {
-    result.message = message.msg;
-  }
-
-  {
-    CLockObject lock(m_mutex);
-    delete message.event;
-    m_queue.erase(seq);
-  }
+  return m_session->ReadResult(m, result);
 }
 
 bool CHTSPData::GetDriveSpace(long long *total, long long *used)
@@ -198,6 +158,63 @@ bool CHTSPData::GetBackendTime(time_t *utcTime, int *gmtOffset)
   return true;
 }
 
+
+CodecVector CHTSPData::GetTranscodingCodecs(void)
+{
+  htsmsg_t *msg;
+  htsmsg_field_t *f;
+  CodecVector v;
+  CHTSResult result;
+
+  msg = htsmsg_create_map();
+  htsmsg_add_str(msg, "method", "getCodecs");
+
+  ReadResult(msg, result);
+  if (result.status != PVR_ERROR_NO_ERROR)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to getCodecs", __FUNCTION__);
+    return v;
+  }
+
+  msg = htsmsg_get_list(result.message, "encoders");
+  if(!msg)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to get encoders", __FUNCTION__);
+    return v;
+  }
+
+  HTSMSG_FOREACH(f, msg) {
+    if (f->hmf_type != HMF_STR)
+      continue;
+
+    if (!strcmp("AAC", f->hmf_str))
+      v.push_back(CODEC_ID_AAC);
+
+    else if (!strcmp("MPEG2AUDIO", f->hmf_str))
+      v.push_back(CODEC_ID_MP2);
+
+    else if (!strcmp("AC3", f->hmf_str))
+      v.push_back(CODEC_ID_AC3);
+
+    else if (!strcmp("VORBIS", f->hmf_str))
+      v.push_back(CODEC_ID_VORBIS);
+
+    else if (!strcmp("MPEG2VIDEO", f->hmf_str))
+      v.push_back(CODEC_ID_MPEG2VIDEO);
+
+    else if (!strcmp("H264", f->hmf_str))
+      v.push_back(CODEC_ID_H264);
+
+    else if (!strcmp("VP8", f->hmf_str))
+      v.push_back(CODEC_ID_VP8);
+
+    else if (!strcmp("MPEG4VIDEO", f->hmf_str))
+      v.push_back(CODEC_ID_MPEG4);
+  }
+
+  return v;
+}
+
 unsigned int CHTSPData::GetNumChannels()
 {
   return GetChannels().size();
@@ -236,57 +253,24 @@ PVR_ERROR CHTSPData::GetEpg(ADDON_HANDLE handle, const PVR_CHANNEL &channel, tim
 
   if (channels.find(channel.iUniqueId) != channels.end())
   {
-    time_t stop;
 
-    SEvent ev;
-    ev.id = channels[channel.iUniqueId].event;
-    if (ev.id == 0)
-      return retVal;
-
-    do
+    /* Full channel update */
+    if (GetProtocol() >= 6)
     {
-      PVR_ERROR result = GetEvent(ev, ev.id);
-      if (result == PVR_ERROR_NO_ERROR)
+      retVal = GetEvents(handle, channel.iUniqueId, iEnd);
+    }
+    /* Event at a time */
+    else
+    {
+      uint32_t eventId = channels[channel.iUniqueId].event;
+      if (eventId != 0)
       {
-        EPG_TAG broadcast;
-        memset(&broadcast, 0, sizeof(EPG_TAG));
-
-        broadcast.iUniqueBroadcastId  = ev.id;
-        broadcast.strTitle            = ev.title.c_str();
-        broadcast.iChannelNumber      = ev.chan_id >= 0 ? ev.chan_id : channel.iUniqueId;
-        broadcast.startTime           = ev.start;
-        broadcast.endTime             = ev.stop;
-        broadcast.strPlotOutline      = ""; // unused
-        broadcast.strPlot             = ev.descs.c_str();
-        broadcast.strIconPath         = ""; // unused
-        broadcast.iGenreType          = (ev.content & 0x0F) << 4;
-        broadcast.iGenreSubType       = ev.content & 0xF0;
-        broadcast.strGenreDescription = "";
-        broadcast.firstAired          = 0;  // unused
-        broadcast.iParentalRating     = 0;  // unused
-        broadcast.iStarRating         = 0;  // unused
-        broadcast.bNotify             = false;
-        broadcast.iSeriesNumber       = 0;  // unused
-        broadcast.iEpisodeNumber      = 0;  // unused
-        broadcast.iEpisodePartNumber  = 0;  // unused
-        broadcast.strEpisodeName      = ""; // unused
-
-        PVR->TransferEpgEntry(handle, &broadcast);
-
-        ev.id = ev.next;
-        stop = ev.stop;
+        do
+        {
+          retVal = GetEvent(handle, &eventId, iEnd);
+        } while(eventId && retVal == PVR_ERROR_NO_ERROR);
       }
-      else
-      {
-        retVal = result;
-        break;
-      }
-
-    } while(iEnd > stop && ev.id != 0);
-  }
-  else
-  {
-    retVal = PVR_ERROR_UNKNOWN;
+    }
   }
 
   return retVal;
@@ -322,9 +306,9 @@ PVR_ERROR CHTSPData::GetRecordings(ADDON_HANDLE handle)
   for(SRecordings::const_iterator it = recordings.begin(); it != recordings.end(); ++it)
   {
     SRecording recording = it->second;
-
-    CStdString strStreamURL = "http://";
+    CStdString strStreamURL;
     CStdString strRecordingId;
+    CStdString strDirectory = "/";
     std::string strChannelName = "";
 
     /* lock */
@@ -334,20 +318,28 @@ PVR_ERROR CHTSPData::GetRecordings(ADDON_HANDLE handle)
       if (itr != m_channels.end())
         strChannelName = itr->second.name.c_str();
 
-      if (g_strUsername != "")
-      {
-        strStreamURL += g_strUsername;
-        if (g_strPassword != "")
-        {
-          strStreamURL += ":";
-          strStreamURL += g_strPassword;
-        }
-        strStreamURL += "@";
-      }
-      strStreamURL.Format("%s%s:%i/dvrfile/%i", strStreamURL.c_str(), g_strHostname.c_str(), g_iPortHTTP, recording.id);
+      /* HTSPv7+ - use HTSP */
+      if (GetProtocol() >= 7)
+        strStreamURL = "";
+
+      /* HTSPv6- - use HTTP */
+      else
+        strStreamURL = m_session->GetWebURL("/dvrfile/%i", recording.id);
     }
 
     strRecordingId.Format("%i", recording.id);
+
+    if (recording.path != "")
+    {
+      size_t i, idx = recording.path.rfind("/");
+      if (idx == 0 || idx == std::string::npos) {
+        strDirectory = "/";
+      } else {
+        strDirectory = recording.path.substr(0, idx);
+        if (strDirectory[0] != '/')
+          strDirectory = "/" + strDirectory;
+      }
+    }
 
     PVR_RECORDING tag;
     memset(&tag, 0, sizeof(PVR_RECORDING));
@@ -355,7 +347,7 @@ PVR_ERROR CHTSPData::GetRecordings(ADDON_HANDLE handle)
     strncpy(tag.strRecordingId, strRecordingId.c_str(), sizeof(tag.strRecordingId) - 1);
     strncpy(tag.strTitle, recording.title.c_str(), sizeof(tag.strTitle) - 1);
     strncpy(tag.strStreamURL, strStreamURL.c_str(), sizeof(tag.strStreamURL) - 1);
-    tag.strDirectory[0] = '/';
+    strncpy(tag.strDirectory, strDirectory.c_str(), sizeof(tag.strDirectory) - 1);
     strncpy(tag.strPlot, recording.description.c_str(), sizeof(tag.strPlot) - 1);
     strncpy(tag.strChannelName, strChannelName.c_str(), sizeof(tag.strChannelName) - 1);
     tag.recordingTime  = recording.start;
@@ -408,13 +400,16 @@ PVR_ERROR CHTSPData::GetChannelGroups(ADDON_HANDLE handle)
 {
   for(unsigned int iTagPtr = 0; iTagPtr < m_tags.size(); iTagPtr++)
   {
-    PVR_CHANNEL_GROUP tag;
-    memset(&tag, 0 , sizeof(PVR_CHANNEL_GROUP));
+    if (!m_tags[iTagPtr].name.empty())
+    {
+      PVR_CHANNEL_GROUP tag;
+      memset(&tag, 0 , sizeof(PVR_CHANNEL_GROUP));
 
-    tag.bIsRadio     = false;
-    strncpy(tag.strGroupName, m_tags[iTagPtr].name.c_str(), sizeof(tag.strGroupName) - 1);
+      tag.bIsRadio     = false;
+      strncpy(tag.strGroupName, m_tags[iTagPtr].name.c_str(), sizeof(tag.strGroupName) - 1);
 
-    PVR->TransferChannelGroup(handle, &tag);
+      PVR->TransferChannelGroup(handle, &tag);
+    }
   }
 
   return PVR_ERROR_NO_ERROR;
@@ -444,8 +439,10 @@ PVR_ERROR CHTSPData::GetChannelGroupMembers(ADDON_HANDLE handle, const PVR_CHANN
       tag.iChannelUniqueId = channel.id;
       tag.iChannelNumber   = channel.num;
 
+#if HTSP_DEBUGGING
       XBMC->Log(LOG_DEBUG, "%s - add channel %s (%d) to group '%s' channel number %d",
           __FUNCTION__, channel.name.c_str(), tag.iChannelUniqueId, group.strGroupName, channel.num);
+#endif
 
       PVR->TransferChannelGroupMember(handle, &tag);
     }
@@ -547,13 +544,22 @@ PVR_ERROR CHTSPData::AddTimer(const PVR_TIMER &timer)
 
   htsmsg_t *msg = htsmsg_create_map();
   htsmsg_add_str(msg, "method",      "addDvrEntry");
-  htsmsg_add_u32(msg, "eventId",     -1); // XXX tvheadend doesn't correct epg tags with wrong start and end times, so we'll use xbmc's values
-  htsmsg_add_str(msg, "title",       timer.strTitle);
-  htsmsg_add_u32(msg, "start",       startTime);
-  htsmsg_add_u32(msg, "stop",        timer.endTime);
-  htsmsg_add_u32(msg, "channelId",   timer.iClientChannelUid);
+  if ((GetProtocol() >= 6) && timer.iEpgUid > 0)
+  {
+    htsmsg_add_u32(msg, "eventId",     timer.iEpgUid);
+    htsmsg_add_s64(msg, "startExtra",  timer.iMarginStart);
+    htsmsg_add_s64(msg, "stopExtra",   timer.iMarginEnd);
+  }
+  else
+  {
+    htsmsg_add_str(msg, "title",       timer.strTitle);
+    htsmsg_add_u32(msg, "start",       startTime);
+    htsmsg_add_u32(msg, "stop",        timer.endTime);
+    htsmsg_add_u32(msg, "channelId",   timer.iClientChannelUid);
+    htsmsg_add_str(msg, "description", timer.strSummary);
+    htsmsg_add_u32(msg, "eventId",     -1);
+  }
   htsmsg_add_u32(msg, "priority",    prio);
-  htsmsg_add_str(msg, "description", timer.strSummary);
   htsmsg_add_str(msg, "creator",     "XBMC");
 
   CHTSResult result;
@@ -641,89 +647,43 @@ PVR_ERROR CHTSPData::RenameRecording(const PVR_RECORDING &recording, const char 
 }
 
 
-void *CHTSPData::Process()
+bool CHTSPData::ProcessMessage(htsmsg* msg)
 {
-  XBMC->Log(LOG_DEBUG, "%s - starting", __FUNCTION__);
-
-  bool bInitialised(false);
-  htsmsg_t* msg;
-  while (!IsStopped())
-  {
-    if (!bInitialised && !m_session->IsConnected())
-      break;
-
-    if (!CheckConnection())
-    {
-      Sleep(1000);
-      continue;
-    }
-
-    /* if there's anything in the buffer, read it */
-    msg = m_session->ReadMessage(5);
-    if(msg == NULL || msg->hm_data == NULL)
-    {
-      if (msg)
-        htsmsg_destroy(msg);
-      Sleep(5);
-      continue;
-    }
-
-    uint32_t seq;
-    if(htsmsg_get_u32(msg, "seq", &seq) == 0)
-    {
-      CLockObject lock(m_mutex);
-      SMessages::iterator it = m_queue.find(seq);
-      if(it != m_queue.end())
-      {
-        it->second.msg = msg;
-        it->second.event->Broadcast();
-        continue;
-      }
-    }
-
-    const char* method;
-    if((method = htsmsg_get_str(msg, "method")) == NULL)
-    {
-      htsmsg_destroy(msg);
-      continue;
-    }
-
-    CLockObject lock(m_mutex);
-    if     (strstr(method, "channelAdd"))
-      ParseChannelUpdate(msg);
-    else if(strstr(method, "channelUpdate"))
-      ParseChannelUpdate(msg);
-    else if(strstr(method, "channelDelete"))
-      ParseChannelRemove(msg);
-    else if(strstr(method, "tagAdd"))
-      ParseTagUpdate(msg);
-    else if(strstr(method, "tagUpdate"))
-      ParseTagUpdate(msg);
-    else if(strstr(method, "tagDelete"))
-      ParseTagRemove(msg);
-    else if(strstr(method, "initialSyncCompleted"))
-    {
-      CLockObject lock(m_mutex);
-      bInitialised = true;
-      m_bIsStarted = true;
-      m_started.Broadcast();
-    }
-    else if(strstr(method, "dvrEntryAdd"))
-      ParseDVREntryUpdate(msg);
-    else if(strstr(method, "dvrEntryUpdate"))
-      ParseDVREntryUpdate(msg);
-    else if(strstr(method, "dvrEntryDelete"))
-      ParseDVREntryDelete(msg);
-    else
-      XBMC->Log(LOG_DEBUG, "%s - Unmapped action recieved '%s'", __FUNCTION__, method);
-
-    htsmsg_destroy(msg);
-  }
+  const char* method;
+  if((method = htsmsg_get_str(msg, "method")) == NULL)
+    return true;
 
   CLockObject lock(m_mutex);
-  m_started.Broadcast();
-  XBMC->Log(LOG_DEBUG, "%s - exiting", __FUNCTION__);
-  return NULL;
+  if      (m_demux && m_demux->ProcessMessage(msg))
+  {
+    // demux packet
+  }
+  else if(strstr(method, "channelAdd"))
+    ParseChannelUpdate(msg);
+  else if(strstr(method, "channelUpdate"))
+    ParseChannelUpdate(msg);
+  else if(strstr(method, "channelDelete"))
+    ParseChannelRemove(msg);
+  else if(strstr(method, "tagAdd"))
+    ParseTagUpdate(msg);
+  else if(strstr(method, "tagUpdate"))
+    ParseTagUpdate(msg);
+  else if(strstr(method, "tagDelete"))
+    ParseTagRemove(msg);
+  else if(strstr(method, "initialSyncCompleted"))
+  {
+    m_bIsStarted = true;
+    m_started.Broadcast();
+  }
+  else if(strstr(method, "dvrEntryAdd"))
+    ParseDVREntryUpdate(msg);
+  else if(strstr(method, "dvrEntryUpdate"))
+    ParseDVREntryUpdate(msg);
+  else if(strstr(method, "dvrEntryDelete"))
+    ParseDVREntryDelete(msg);
+  else
+    XBMC->Log(LOG_DEBUG, "%s - Unmapped action recieved '%s'", __FUNCTION__, method);
+  return true;
 }
 
 SChannels CHTSPData::GetChannels()
@@ -771,24 +731,16 @@ STags CHTSPData::GetTags()
   return m_tags;
 }
 
-PVR_ERROR CHTSPData::GetEvent(SEvent& ev, uint32_t id)
+PVR_ERROR CHTSPData::GetEvent(ADDON_HANDLE handle, uint32_t *id, time_t stop)
 {
-  if(id == 0)
+  if(*id == 0)
   {
-    ev.Clear();
     return PVR_ERROR_UNKNOWN;
-  }
-
-  SEvents::iterator it = m_events.find(id);
-  if(it != m_events.end())
-  {
-    ev = it->second;
-    return PVR_ERROR_NO_ERROR;
   }
 
   htsmsg_t *msg = htsmsg_create_map();
   htsmsg_add_str(msg, "method", "getEvent");
-  htsmsg_add_u32(msg, "eventId", id);
+  htsmsg_add_u32(msg, "eventId", *id);
 
   CHTSResult result;
   ReadResult(msg, result);
@@ -798,20 +750,69 @@ PVR_ERROR CHTSPData::GetEvent(SEvent& ev, uint32_t id)
     return result.status;
   }
 
-  if (ParseEvent(result.message, id, ev))
+  if (ParseEvent(handle, result.message, id, stop))
   {
-    m_events[id] = ev;
     return PVR_ERROR_NO_ERROR;
   }
 
   return PVR_ERROR_SERVER_ERROR;
 }
 
+PVR_ERROR CHTSPData::GetEvents(ADDON_HANDLE handle, uint32_t cid, time_t stop)
+{
+  PVR_ERROR retVal = PVR_ERROR_NO_ERROR;
+
+  if (cid == 0)
+  {
+    return PVR_ERROR_UNKNOWN;
+  }
+
+  htsmsg_t *msg = htsmsg_create_map();
+  htsmsg_add_str(msg, "method", "getEvents");
+  htsmsg_add_u32(msg, "channelId", cid);
+  htsmsg_add_s64(msg, "maxTime", stop);
+
+  CHTSResult result;
+  ReadResult(msg, result);
+  if(result.status != PVR_ERROR_NO_ERROR)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to get events for %d", __FUNCTION__, cid);
+    return result.status;
+  }
+
+  if (!(msg = htsmsg_get_list(result.message, "events"))) {
+    XBMC->Log(LOG_DEBUG, "%s - failed to get events for %d", __FUNCTION__, cid);
+    return PVR_ERROR_UNKNOWN;
+  }
+
+  htsmsg_t *e;
+  htsmsg_field_t *f;
+
+  unsigned int failedEvents = 0;
+  unsigned int goodEvents = 0;
+
+  HTSMSG_FOREACH(f, msg)
+  {
+    if ((e = htsmsg_get_map_by_field(f)))
+    {
+      if (ParseEvent(handle, e, NULL, stop))
+        goodEvents++;
+      else
+        failedEvents++;
+    }
+  }
+
+  if (goodEvents == 0 && failedEvents > 0)
+    retVal = PVR_ERROR_SERVER_ERROR;
+
+  return retVal;
+}
+
 bool CHTSPData::SendEnableAsync()
 {
   htsmsg_t *m = htsmsg_create_map();
   htsmsg_add_str(m, "method", "enableAsyncMetadata");
-  return m_session->ReadSuccess(m, true, "enableAsyncMetadata failed");
+  return m_session->ReadSuccess(m, "enableAsyncMetadata");
 }
 
 void CHTSPData::ParseChannelRemove(htsmsg_t* msg)
@@ -832,7 +833,7 @@ void CHTSPData::ParseChannelRemove(htsmsg_t* msg)
 
 void CHTSPData::ParseChannelUpdate(htsmsg_t* msg)
 {
-  bool bChanged(false);
+  bool bChannelChanged(false), bTagsChanged(false);
   uint32_t iChannelId, iEventId = 0, iChannelNumber = 0, iCaid = 0;
   const char *strName, *strIconPath;
   if(htsmsg_get_u32(msg, "channelId", &iChannelId))
@@ -850,44 +851,70 @@ void CHTSPData::ParseChannelUpdate(htsmsg_t* msg)
 
   if((strName = htsmsg_get_str(msg, "channelName")))
   {
-    bChanged = (channel.name != strName);
-    channel.name = strName;
+    if (channel.name != strName)
+    {
+      bChannelChanged = true;
+      channel.name = strName;
+    }
   }
 
   if((strIconPath = htsmsg_get_str(msg, "channelIcon")))
   {
-    bChanged = (channel.icon != strIconPath);
-    channel.icon = strIconPath;
+    CStdString strIconURL;
+
+    if (strIconPath[0] != '/' || strIconPath[0] == '\0')
+      strIconURL = strIconPath;
+    else
+      strIconURL = m_session->GetWebURL("%s", strIconPath);
+
+    if (channel.icon != strIconURL)
+    {
+      bChannelChanged = true;
+      channel.icon = strIconURL;
+    }
   }
 
   if(htsmsg_get_u32(msg, "channelNumber", &iChannelNumber) == 0)
   {
     int iNewChannelNumber = (iChannelNumber == 0) ? iChannelId + 1000 : iChannelNumber;
-    bChanged = (channel.num != iNewChannelNumber);
-    channel.num = iNewChannelNumber;
+    if (channel.num != iNewChannelNumber)
+    {
+      bChannelChanged = true;
+      channel.num = iNewChannelNumber;
+    }
   }
 
   htsmsg_t *tags;
 
   if((tags = htsmsg_get_list(msg, "tags")))
   {
-    bChanged = true;
-    channel.tags.clear();
-
+    std::vector<int> newTags;
     htsmsg_field_t *f;
     HTSMSG_FOREACH(f, tags)
     {
       if(f->hmf_type != HMF_S64)
         continue;
-      channel.tags.push_back((int)f->hmf_s64);
+      newTags.push_back((int)f->hmf_s64);
     }
+
+    for (std::vector<int>::const_iterator it = newTags.begin(); it != newTags.end(); it++)
+    {
+      if (std::find(channel.tags.begin(), channel.tags.end(), *it) == channel.tags.end())
+        bTagsChanged = true;
+    }
+    for (std::vector<int>::const_iterator it = channel.tags.begin(); it != channel.tags.end(); it++)
+    {
+      if (std::find(newTags.begin(), newTags.end(), *it) == newTags.end())
+        bTagsChanged = true;
+    }
+    if (bTagsChanged)
+      channel.tags = newTags;
   }
 
   htsmsg_t *services;
-
+  bool bIsRadio = channel.radio;
   if((services = htsmsg_get_list(msg, "services")))
   {
-    bChanged = true;
     htsmsg_field_t *f;
     HTSMSG_FOREACH(f, services)
     {
@@ -897,20 +924,33 @@ void CHTSPData::ParseChannelUpdate(htsmsg_t* msg)
       htsmsg_t *service = &f->hmf_msg;
       const char *service_type = htsmsg_get_str(service, "type");
       if(service_type != NULL)
-      {
-        channel.radio = !strcmp(service_type, "Radio");
-      }
+        bIsRadio = !strcmp(service_type, "Radio");
 
       if(!htsmsg_get_u32(service, "caid", &iCaid))
-        channel.caid = (int) iCaid;
+      {
+        if ((channel.caid != (int)iCaid))
+        {
+          bChannelChanged = true;
+          channel.caid = (int) iCaid;
+        }
+      }
     }
   }
+  if (channel.radio != bIsRadio)
+  {
+    bChannelChanged = true;
+    channel.radio = bIsRadio;
+  }
 
+#if HTSP_DEBUGGING
   XBMC->Log(LOG_DEBUG, "%s - id:%u, name:'%s', icon:'%s', event:%u",
       __FUNCTION__, iChannelId, strName ? strName : "(null)", strIconPath ? strIconPath : "(null)", iEventId);
+#endif
 
-  if (bChanged)
+  if (bChannelChanged)
     PVR->TriggerChannelUpdate();
+  if (bTagsChanged)
+    PVR->TriggerChannelGroupsUpdate();
 }
 
 void CHTSPData::ParseDVREntryDelete(htsmsg_t* msg)
@@ -964,6 +1004,11 @@ void CHTSPData::ParseDVREntryUpdate(htsmsg_t* msg)
   else
     recording.title = str;
 
+  if((str = htsmsg_get_str(msg, "path")) == NULL)
+    recording.path = "";
+  else
+    recording.path = str;
+
   if((str = htsmsg_get_str(msg, "description")) == NULL)
     recording.description = "";
   else
@@ -981,9 +1026,19 @@ void CHTSPData::ParseDVREntryUpdate(htsmsg_t* msg)
     recording.error.clear();
   }
 
-  XBMC->Log(LOG_DEBUG, "%s - id:%u, state:'%s', title:'%s', description: '%s'"
+  // Missing file (hide)
+  else if (recording.error == "File missing")
+  {
+    recording.state = ST_INVALID;
+    recording.error.clear();
+  }
+
+
+#if HTSP_DEBUGGING
+  XBMC->Log(LOG_DEBUG, "%s - id:%u, state:'%s', title:'%s', description: '%s', error:'%s'"
       , __FUNCTION__, recording.id, state, recording.title.c_str()
-      , recording.description.c_str());
+      , recording.description.c_str(), recording.error.c_str());
+#endif
 
   m_recordings[recording.id] = recording;
 
@@ -993,64 +1048,86 @@ void CHTSPData::ParseDVREntryUpdate(htsmsg_t* msg)
    PVR->TriggerRecordingUpdate();
 }
 
-bool CHTSPData::ParseEvent(htsmsg_t* msg, uint32_t id, SEvent &event)
+bool CHTSPData::ParseEvent(ADDON_HANDLE handle, htsmsg_t* msg, uint32_t *id, time_t end)
 {
-  uint32_t start, stop, next, chan_id, content;
-  const char *title, *desc, *ext_desc;
-  if(         htsmsg_get_u32(msg, "start", &start)
-  ||          htsmsg_get_u32(msg, "stop" , &stop)
-  || (title = htsmsg_get_str(msg, "title")) == NULL)
+  uint32_t eventId, channelId, content, nextId, stars, age, start, stop;
+  int64_t aired;
+  const char *title, *subtitle, *desc, *summary, *image;
+
+  /* Required fields */
+  if(         htsmsg_get_u32(msg, "eventId",   &eventId)
+  ||          htsmsg_get_u32(msg, "channelId", &channelId)
+  ||          htsmsg_get_u32(msg, "start",     &start)
+  ||          htsmsg_get_u32(msg, "stop" ,     &stop)
+  || (title = htsmsg_get_str(msg, "title")) == NULL
+  || (id && (*id != eventId)))
   {
     XBMC->Log(LOG_DEBUG, "%s - malformed event", __FUNCTION__);
     htsmsg_print(msg);
     return false;
   }
-  event.Clear();
-  event.id    = id;
-  event.start = start;
-  event.stop  = stop;
-  event.title = title;
 
+  /* Optional fields */
+  summary  = htsmsg_get_str(msg, "summary");
+  subtitle = htsmsg_get_str(msg, "subtitle");
   desc     = htsmsg_get_str(msg, "description");
-  ext_desc = htsmsg_get_str(msg, "ext_text");
+  image    = htsmsg_get_str(msg, "image");
+  content  = htsmsg_get_u32_or_default(msg, "contentType", 0);
+  nextId   = htsmsg_get_u32_or_default(msg, "nextEventId", 0);
+  stars    = htsmsg_get_u32_or_default(msg, "starRating", 0);
+  age      = htsmsg_get_u32_or_default(msg, "ageRating", 0);
+  htsmsg_get_s64(msg, "firstAired", &aired);
 
-  if (desc && ext_desc)
-  {
-    string strBuf = desc;
-    strBuf.append(ext_desc);
-    event.descs = strBuf;
-  }
-  else if (desc)
-    event.descs = desc;
-  else if (ext_desc)
-    event.descs = ext_desc;
-  else
-    event.descs = "";
+  /* Fix old genre spec */
+  if (GetProtocol() < 6)
+    content = content << 4;
 
-  if(htsmsg_get_u32(msg, "nextEventId", &next))
-    event.next = 0;
-  else
-    event.next = next;
-  if(htsmsg_get_u32(msg, "channelId", &chan_id))
-    event.chan_id = -1;
-  else
-    event.chan_id = chan_id;
-  if(htsmsg_get_u32(msg, "contentType", &content))
-    event.content = -1;
-  else
-    event.content = content;
-
+#if HTSP_DEBUGGING
   XBMC->Log(LOG_DEBUG, "%s - id:%u, chan_id:%u, title:'%s', genre_type:%u, genre_sub_type:%u, desc:'%s', start:%u, stop:%u, next:%u"
                     , __FUNCTION__
-                    , event.id
-                    , event.chan_id
-                    , event.title.c_str()
-                    , event.content & 0x0F
-                    , event.content & 0xF0
-                    , event.descs.c_str()
-                    , event.start
-                    , event.stop
-                    , event.next);
+                    , eventId
+                    , channelId
+                    , title
+                    , content & 0xF0
+                    , content & 0x0F
+                    , desc
+                    , start
+                    , stop
+                    , nextId);
+#endif
+
+  /* Broadcast */
+  EPG_TAG broadcast;
+  memset(&broadcast, 0, sizeof(EPG_TAG));
+
+  broadcast.iUniqueBroadcastId  = eventId;
+  broadcast.strTitle            = title;
+  broadcast.iChannelNumber      = channelId;
+  broadcast.startTime           = start;
+  broadcast.endTime             = stop;
+  broadcast.strPlotOutline      = summary ? summary : "";
+  broadcast.strPlot             = desc ? desc : "";
+  broadcast.strIconPath         = image ? image : "";
+  broadcast.iGenreType          = content & 0xF0;
+  broadcast.iGenreSubType       = content & 0x0F;
+  broadcast.strGenreDescription = ""; // unused
+  broadcast.firstAired          = (time_t) aired;
+  broadcast.iParentalRating     = age;
+  broadcast.iStarRating         = stars;
+  broadcast.bNotify             = false;
+  broadcast.iSeriesNumber       = htsmsg_get_u32_or_default(msg, "seasonNumber", 0);
+  broadcast.iEpisodeNumber      = htsmsg_get_u32_or_default(msg, "episodeNumber", 0);
+  broadcast.iEpisodePartNumber  = htsmsg_get_u32_or_default(msg, "partNumber", 0);
+  broadcast.strEpisodeName      = subtitle ? subtitle : "";
+
+  /* Post to PVR */
+  PVR->TransferEpgEntry(handle, &broadcast);
+
+  /* Update next */
+  if (id && ((time_t)stop < end))
+    *id = nextId;
+  else if (id)
+    *id = 0;
 
   return true;
 }
@@ -1105,8 +1182,268 @@ void CHTSPData::ParseTagUpdate(htsmsg_t* msg)
     }
   }
 
+#if HTSP_DEBUGGING
   XBMC->Log(LOG_DEBUG, "%s - id:%u, name:'%s', icon:'%s'"
       , __FUNCTION__, id, name ? name : "(null)", icon ? icon : "(null)");
+#endif
 
   PVR->TriggerChannelGroupsUpdate();
+}
+
+bool CHTSPData::OpenRecordedStream(const PVR_RECORDING &recording)
+{
+  if (GetProtocol() < 7) return false;
+
+  htsmsg_t *msg = htsmsg_create_map();
+  htsmsg_add_str(msg, "method", "fileOpen");
+
+  CStdString strDvrPath;
+  strDvrPath.Format("dvr/%s", recording.strRecordingId);
+  htsmsg_add_str(msg, "file", strDvrPath.c_str());
+
+  CHTSResult result;
+  ReadResult(msg, result);
+  if (result.status != PVR_ERROR_NO_ERROR)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to fileOpen", __FUNCTION__);
+    return false;
+  }
+
+  uint32_t id;
+  if (htsmsg_get_u32(result.message, "id", &id))
+    return false;
+  m_recordingId  = id;
+  m_recordingOff = 0;
+  m_recordingBuf.reset();
+
+  return true;
+}
+
+void CHTSPData::CloseRecordedStream(void)
+{
+  if (GetProtocol() < 7) return;
+  if (!m_recordingId) return;
+
+  htsmsg_t *msg = htsmsg_create_map();
+  htsmsg_add_str(msg, "method", "fileClose");
+  htsmsg_add_u32(msg, "id", m_recordingId);
+  CHTSResult result;
+  ReadResult(msg, result);
+  if (result.status != PVR_ERROR_NO_ERROR)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to fileClose", __FUNCTION__);
+  }
+  m_recordingId = 0;
+}
+
+int CHTSPData::ReadRecordedStream(unsigned char *pBuffer, unsigned int iBufferSize)
+{
+  ssize_t     ret;
+  if (GetProtocol() < 7) return 0;
+  if (!m_recordingId) return -1;
+
+  /* Fetch data */
+  if (m_recordingBuf.avail() <= iBufferSize)
+  {
+    const void *buf;
+    size_t      len;
+    htsmsg_t *msg = htsmsg_create_map();
+    htsmsg_add_str(msg, "method", "fileRead");
+    htsmsg_add_u32(msg, "id", m_recordingId);
+    htsmsg_add_s64(msg, "size", m_recordingBuf.free());
+    CHTSResult result;
+    ReadResult(msg, result);
+    if (result.status != PVR_ERROR_NO_ERROR)
+    {
+      XBMC->Log(LOG_DEBUG, "%s - failed to fileRead", __FUNCTION__);
+      return -1;
+    }
+    if (htsmsg_get_bin(result.message, "data", &buf, &len)) {
+      XBMC->Log(LOG_DEBUG, "%s - failed fileRead no buffer", __FUNCTION__);
+      return -1;
+    }
+    ret = m_recordingBuf.write((unsigned char*)buf, len);
+    if (ret != (ssize_t)len)
+    {
+      XBMC->Log(LOG_ERROR, "%s - CircBuffer::write() partial %ld != %ld", __FUNCTION__, ret, len);
+      return -1;
+    }
+  }
+
+  /* Read */
+  ret = m_recordingBuf.read(pBuffer, iBufferSize);
+  m_recordingOff += ret;
+  return (int)ret;
+}
+
+long long CHTSPData::SeekRecordedStream(long long iPosition, int iWhence /* = SEEK_SET */)
+{
+  if (GetProtocol() < 7) return 0;
+  if (!m_recordingId)    return -1;
+  htsmsg_t *msg = htsmsg_create_map();
+  htsmsg_add_str(msg, "method", "fileSeek");
+  htsmsg_add_u32(msg, "id",     m_recordingId);
+  htsmsg_add_s64(msg, "offset", iPosition);
+  if (iWhence == SEEK_CUR)
+    htsmsg_add_str(msg, "whence", "SEEK_CUR");
+  else if (iWhence == SEEK_END)
+    htsmsg_add_str(msg, "whence", "SEEK_END");
+  //else
+  //  htsmsg_add_str(msg, "whence", SEEK_SET");
+  // Note: last is default so no need to send
+  CHTSResult result;
+  ReadResult(msg, result);
+  if (result.status != PVR_ERROR_NO_ERROR)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to fileSeek", __FUNCTION__);
+    return -1;
+  }
+  int64_t off;
+  if (htsmsg_get_s64(result.message, "offset", &off)) {
+    XBMC->Log(LOG_DEBUG, "%s - failed to fileSeek no offset", __FUNCTION__);
+    return -1;
+  }
+  m_recordingOff = off;
+  m_recordingBuf.reset();
+  return m_recordingOff;
+}
+
+long long CHTSPData::PositionRecordedStream(void)
+{
+  if (GetProtocol() < 7) return 0;
+  return m_recordingOff;
+}
+
+long long CHTSPData::LengthRecordedStream(void)
+{
+  if (GetProtocol() < 7) return 0;
+  if (!m_recordingOff) return -1;
+  htsmsg_t *msg = htsmsg_create_map();
+  htsmsg_add_str(msg, "method", "fileStat");
+  htsmsg_add_u32(msg, "id",     m_recordingId);
+  CHTSResult result;
+  ReadResult(msg, result);
+  if (result.status != PVR_ERROR_NO_ERROR)
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to fileStat", __FUNCTION__);
+    return -1;
+  }
+  int64_t size;
+  if (htsmsg_get_s64(result.message, "size", &size))
+  {
+    XBMC->Log(LOG_DEBUG, "%s - failed to fileStat no size", __FUNCTION__);
+    return -1;
+  }
+  return size;
+}
+
+bool CHTSPData::OnConnectionDropped(void)
+{
+  if (m_demux)
+    m_demux->OnConnectionDropped();
+  m_bIsStarted = false;
+  if (m_connectionWarningTimeout.TimeLeft() == 0)
+  {
+    // don't show the warning more than once every 5 seconds
+    m_connectionWarningTimeout.Init(5000);
+
+    CStdString strNotification(XBMC->GetLocalizedString(30500));
+    XBMC->QueueNotification(QUEUE_ERROR, strNotification, GetServerName());
+  }
+  return true;
+}
+
+bool CHTSPData::OnConnectionRestored(void)
+{
+  if(!SendEnableAsync())
+    return false;
+
+  {
+    CLockObject lock(m_mutex);
+    if (!m_started.Wait(m_mutex, m_bIsStarted, g_iConnectTimeout * 1000))
+      return false;
+  }
+
+  if (m_demux)
+    m_demux->OnConnectionRestored();
+
+  CStdString strNotification(XBMC->GetLocalizedString(30501));
+  XBMC->QueueNotification(QUEUE_INFO, strNotification, GetServerName());
+  return true;
+}
+
+bool CHTSPData::OpenLiveStream(const PVR_CHANNEL &channel)
+{
+  CloseLiveStream();
+
+  if (!IsConnected() || !m_demux)
+    return false;
+
+  return m_demux->Open(channel);
+}
+
+void CHTSPData::CloseLiveStream(void)
+{
+  if (m_demux)
+    m_demux->Close();
+}
+
+int CHTSPData::GetCurrentClientChannel(void)
+{
+  return m_demux ?
+      m_demux->CurrentChannel() :
+      -1;
+}
+
+bool CHTSPData::SwitchChannel(const PVR_CHANNEL &channel)
+{
+  return m_demux ?
+      m_demux->SwitchChannel(channel) :
+      false;
+}
+
+PVR_ERROR CHTSPData::GetStreamProperties(PVR_STREAM_PROPERTIES* pProperties)
+{
+  return m_demux && m_demux->GetStreamProperties(pProperties) ?
+      PVR_ERROR_NO_ERROR :
+      PVR_ERROR_SERVER_ERROR;
+}
+
+PVR_ERROR CHTSPData::SignalStatus(PVR_SIGNAL_STATUS &signalStatus)
+{
+  return m_demux && m_demux->GetSignalStatus(signalStatus) ?
+      PVR_ERROR_NO_ERROR :
+      PVR_ERROR_SERVER_ERROR;
+}
+
+void CHTSPData::DemuxAbort(void)
+{
+  if (m_demux)
+    m_demux->Abort();
+}
+
+void CHTSPData::DemuxFlush(void)
+{
+  if (m_demux)
+    m_demux->Flush();
+}
+
+DemuxPacket* CHTSPData::DemuxRead(void)
+{
+  return m_demux ?
+      m_demux->Read() :
+      NULL;
+}
+
+bool CHTSPData::SeekTime(int time,bool backward,double *startpts)
+{
+  return m_demux && CanSeekLiveStream() ?
+      m_demux->SeekTime(time, backward, startpts) :
+      false;
+}
+
+void CHTSPData::SetSpeed(int speed)
+{
+  if (m_demux && CanTimeshift())
+      m_demux->SetSpeed(speed);
 }

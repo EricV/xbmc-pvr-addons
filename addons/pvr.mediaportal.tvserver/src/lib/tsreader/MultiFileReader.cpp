@@ -1,5 +1,5 @@
 /*
- *      Copyright (C) 2005-2011 Team XBMC
+ *      Copyright (C) 2005-2012 Team XBMC
  *      http://www.xbmc.org
  *
  *  This program is free software: you can redistribute it and/or modify
@@ -14,16 +14,22 @@
  *
  *  You should have received a copy of the GNU General Public License
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-/*
+ *
+ *************************************************************************
+ *  This file is a modified version from Team MediaPortal's
+ *  TsReader DirectShow filter
+ *  MediaPortal is a GPL'ed HTPC-Application
+ *  Copyright (C) 2005-2012 Team MediaPortal
+ *  http://www.team-mediaportal.com
+ *
+ * Changes compared to Team MediaPortal's version:
+ * - Code cleanup for PVR addon usage
+ * - Code refactoring for cross platform usage
+ *************************************************************************
  *  This file originates from TSFileSource, a GPL directshow push
  *  source filter that provides an MPEG transport stream output.
- *  Copyright (C) 2005      nate
- *  Copyright (C) 2006      bear
- *
- *  nate can be reached on the forums at
- *    http://forums.dvbowners.com/
+ *  Copyright (C) 2005-2006 nate, bear
+ *  http://forums.dvbowners.com/
  */
 
 #include "MultiFileReader.h"
@@ -33,7 +39,8 @@
 #include <algorithm>
 #include "platform/util/timeutils.h"
 #include "platform/util/StdString.h"
-#include "os-dependent.h"
+#include "platform/threads/threads.h"
+#include <inttypes.h>
 
 using namespace ADDON;
 using namespace PLATFORM;
@@ -76,7 +83,20 @@ long MultiFileReader::SetFileName(const char* pszFileName)
 long MultiFileReader::OpenFile()
 {
   long hr = m_TSBufferFile.OpenFile();
+  XBMC->Log(LOG_DEBUG, "MultiFileReader: buffer file opened return code %d.", hr);
   m_lastZapPosition = 0;
+
+  int retryCount = 0;
+
+  while ((m_TSBufferFile.GetFileSize() == 0) && (retryCount < 50))
+  {
+    retryCount++;
+    XBMC->Log(LOG_DEBUG, "MultiFileReader: buffer file has zero length, closing, waiting 100 ms and re-opening. Attempt: %d.", retryCount);
+    m_TSBufferFile.CloseFile();
+    usleep(100000);
+    hr = m_TSBufferFile.OpenFile();
+    XBMC->Log(LOG_DEBUG, "MultiFileReader: buffer file opened return code %d.", hr);
+  }
 
   if (RefreshTSBufferFile() == S_FALSE)
   {
@@ -109,7 +129,7 @@ long MultiFileReader::CloseFile()
   long hr;
   std::vector<MultiFileReaderFile *>::iterator it;
 
-  hr = m_TSBufferFile.CloseFile();
+  m_TSBufferFile.CloseFile();
   hr = m_TSFile.CloseFile();
 
   for (it = m_tsFiles.begin(); it < m_tsFiles.end(); ++it)
@@ -272,7 +292,10 @@ long MultiFileReader::Read(unsigned char* pbData, unsigned long lDataLength, uns
 long MultiFileReader::RefreshTSBufferFile()
 {
   if (m_TSBufferFile.IsFileInvalid())
+  {
+    XBMC->Log(LOG_ERROR, "%s: buffer file is invalid.", __FUNCTION__);
     return S_FALSE;
+  }
 
   unsigned long bytesRead;
   MultiFileReaderFile *file;
@@ -297,11 +320,12 @@ long MultiFileReader::RefreshTSBufferFile()
     int64_t fileLength = m_TSBufferFile.GetFileSize();
 
     // Min file length is Header ( int64_t + int32_t + int32_t ) + filelist ( > 0 ) + Footer ( int32_t + int32_t )
-    if (fileLength <= (int64_t)(sizeof(currentPosition) + sizeof(filesAdded) + sizeof(filesRemoved) + sizeof(wchar_t) + sizeof(filesAdded2) + sizeof(filesRemoved2)))
+    int64_t minimumlength = (int64_t)(sizeof(currentPosition) + sizeof(filesAdded) + sizeof(filesRemoved) + sizeof(Wchar_t) + sizeof(filesAdded2) + sizeof(filesRemoved2));
+    if (fileLength <= minimumlength)
     {
       if (m_bDebugOutput)
       {
-        XBMC->Log(LOG_DEBUG, "MultiFileReader::RefreshTSBufferFile() TSBufferFile too short");
+        XBMC->Log(LOG_DEBUG, "%s: TSBufferFile too short. Minimum length %ld, current length %ld", __FUNCTION__, minimumlength, fileLength);
       }
       return S_FALSE;
     }
@@ -368,7 +392,7 @@ long MultiFileReader::RefreshTSBufferFile()
       // try to clear local / remote SMB file cache. This should happen when we close the filehandle
       m_TSBufferFile.CloseFile();
       m_TSBufferFile.OpenFile();
-      Sleep(5);
+      usleep(5000);
     }
 
     if (Error)
@@ -403,14 +427,14 @@ long MultiFileReader::RefreshTSBufferFile()
     // Removed files that aren't present anymore.
     while ((filesToRemove > 0) && (!m_tsFiles.empty()))
     {
-      MultiFileReaderFile *file = m_tsFiles.at(0);
+      file = m_tsFiles.at(0);
 
       if (m_bDebugOutput)
       {
         XBMC->Log(LOG_DEBUG, "MultiFileReader: Removing file %s\n", file->filename.c_str());
       }
       
-      delete file;
+      SAFE_DELETE(file);
       m_tsFiles.erase(m_tsFiles.begin());
 
       filesToRemove--;
@@ -436,11 +460,10 @@ long MultiFileReader::RefreshTSBufferFile()
     char* filename;
     std::string sFilename;
     std::string path;
-    size_t pos = std::string::npos;
 
     m_TSBufferFile.GetFileName(&filename);
     sFilename = filename;
-    pos = sFilename.find_last_of(PATH_SEPARATOR_CHAR);
+    size_t pos = sFilename.find_last_of(PATH_SEPARATOR_CHAR);
     path = sFilename.substr(0, pos+1);
 
     // Create a list of files in the .tsbuffer file.
@@ -506,10 +529,10 @@ long MultiFileReader::RefreshTSBufferFile()
     {
       std::string pFilename = *itFilenames;
 
+
       if (m_bDebugOutput)
       {
-        int nextStPos = (int)nextStartPosition;
-        XBMC->Log(LOG_DEBUG, "MultiFileReader: Adding file %s (%i)\n", pFilename.c_str(), nextStPos);
+        XBMC->Log(LOG_DEBUG, "MultiFileReader: Adding file %s (%" PRId64 ")\n", pFilename.c_str(), nextStartPosition);
       }
 
       file = new MultiFileReaderFile();
@@ -603,18 +626,17 @@ long MultiFileReader::GetFileLength(const char* pFilename, int64_t &length)
     return HRESULT_FROM_WIN32(dwErr);
   }
   return S_OK;
-#elif defined(TARGET_LINUX) || defined(TARGET_DARWIN)
+#elif defined(TARGET_LINUX) || defined(TARGET_DARWIN) || defined(TARGET_FREEBSD)
   //USES_CONVERSION;
 
   length = 0;
 
   // Try to open the file
-  CFile hFile;
-  struct stat64 filestatus;
-  if (hFile.Open(pFilename) && hFile.Stat(&filestatus) >= 0)
+  void* hFile;
+  if (((hFile = XBMC->OpenFile(pFilename, 0)) != NULL))
   {
-    length = (int64_t) filestatus.st_size;
-    hFile.Close();
+    length = XBMC->GetFileLength(hFile);
+    XBMC->CloseFile(hFile);
   }
   else
   {
